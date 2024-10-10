@@ -74,6 +74,10 @@ type ScannerOption struct {
 
 	FilePatterns      []string
 	ConfigFileSchemas []*ConfigFileSchema
+
+	DisabledCheckIDs []string
+	SkipFiles        []string
+	SkipDirs         []string
 }
 
 func (o *ScannerOption) Sort() {
@@ -212,6 +216,7 @@ func scannerOptions(t detection.FileType, opt ScannerOption) ([]options.ScannerO
 		rego.WithEmbeddedPolicies(!opt.DisableEmbeddedPolicies),
 		rego.WithEmbeddedLibraries(!opt.DisableEmbeddedLibraries),
 		options.ScannerWithIncludeDeprecatedChecks(opt.IncludeDeprecatedChecks),
+		rego.WithDisabledCheckIDs(opt.DisabledCheckIDs...),
 	}
 
 	policyFS, policyPaths, err := CreatePolicyFS(opt.PolicyPaths)
@@ -294,6 +299,8 @@ func addTFOpts(opts []options.ScannerOption, scannerOption ScannerOption) ([]opt
 	opts = append(opts,
 		terraform.ScannerWithAllDirectories(true),
 		terraform.ScannerWithSkipDownloaded(scannerOption.TfExcludeDownloaded),
+		terraform.ScannerWithSkipFiles(scannerOption.SkipFiles),
+		terraform.ScannerWithSkipDirs(scannerOption.SkipDirs),
 	)
 
 	return opts, nil
