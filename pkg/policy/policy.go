@@ -3,25 +3,30 @@ package policy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/open-policy-agent/opa/bundle"
 	"golang.org/x/xerrors"
 	"k8s.io/utils/clock"
 
+	"github.com/aquasecurity/go-version/pkg/part"
+	"github.com/aquasecurity/go-version/pkg/semver"
 	"github.com/aquasecurity/trivy/pkg/fanal/types"
 	"github.com/aquasecurity/trivy/pkg/log"
 	"github.com/aquasecurity/trivy/pkg/oci"
 )
 
 const (
-	BundleVersion    = 0 // Latest released MAJOR version for trivy-checks
-	BundleRepository = "ghcr.io/aquasecurity/trivy-checks"
+	BundleVersion    = 2 // Latest released MAJOR version for trivy-checks
+	BundleRepository = "mirror.gcr.io/aquasec/trivy-checks"
 	policyMediaType  = "application/vnd.cncf.openpolicyagent.layer.v1.tar+gzip"
 	updateInterval   = 24 * time.Hour
+
+	VersionAnnotationKey = "org.opencontainers.image.version"
 )
 
 type options struct {
@@ -58,6 +63,16 @@ type Client struct {
 type Metadata struct {
 	Digest       string
 	DownloadedAt time.Time
+
+	// MajorVersion indicates the major version of the bundle.
+	// Used to invalidate cache when the major version increases.
+	// Nil for old cache entries. Set to 0 for custom builds.
+	MajorVersion *int `json:",omitempty"`
+
+	// CustomBuild is true if the bundle was built manually and did not go
+	// through the official build process that enriches the manifest with additional data.
+	// For custom builds, MajorVersion is not used for cache invalidation.
+	CustomBuild bool `json:",omitempty"`
 }
 
 func (m Metadata) String() string {
@@ -89,26 +104,24 @@ func NewClient(cacheDir string, quiet bool, checkBundleRepo string, opts ...Opti
 	}, nil
 }
 
-func (c *Client) populateOCIArtifact(registryOpts types.RegistryOptions) error {
+func (c *Client) initOCIArtifact(ctx context.Context, registryOpts types.RegistryOptions) {
 	if c.artifact == nil {
-		log.Debug("Loading check bundle", log.String("repository", c.checkBundleRepo))
-		art, err := oci.NewArtifact(c.checkBundleRepo, c.quiet, registryOpts)
-		if err != nil {
-			return xerrors.Errorf("OCI artifact error: %w", err)
-		}
-		c.artifact = art
+		log.DebugContext(ctx, "Initializing OCI checks bundle artifact",
+			log.String("repository", c.checkBundleRepo))
+		c.artifact = oci.NewArtifact(c.checkBundleRepo, registryOpts)
 	}
-	return nil
 }
 
-// DownloadBuiltinPolicies download default policies from GitHub Pages
-func (c *Client) DownloadBuiltinPolicies(ctx context.Context, registryOpts types.RegistryOptions) error {
-	if err := c.populateOCIArtifact(registryOpts); err != nil {
-		return xerrors.Errorf("OPA bundle error: %w", err)
-	}
+// DownloadBuiltinChecks download default policies from GitHub Pages
+func (c *Client) DownloadBuiltinChecks(ctx context.Context, registryOpts types.RegistryOptions) error {
+	c.initOCIArtifact(ctx, registryOpts)
 
 	dst := c.contentDir()
-	if err := c.artifact.Download(ctx, dst, oci.DownloadOption{MediaType: policyMediaType}); err != nil {
+	if err := c.artifact.Download(ctx, dst, oci.DownloadOption{
+		MediaType: policyMediaType,
+		Quiet:     c.quiet,
+	},
+	); err != nil {
 		return xerrors.Errorf("download error: %w", err)
 	}
 
@@ -116,48 +129,107 @@ func (c *Client) DownloadBuiltinPolicies(ctx context.Context, registryOpts types
 	if err != nil {
 		return xerrors.Errorf("digest error: %w", err)
 	}
-	log.Debug("Digest of the built-in policies", log.String("digest", digest))
+
+	ver, err := c.getBundleMajorVersion(ctx)
+	if err != nil {
+		return xerrors.Errorf("get bundle version: %w", err)
+	}
+
+	isCustomBundle := ver == 0
+	if isCustomBundle {
+		log.DebugContext(ctx, "Built-in checks (custom build)",
+			log.String("digest", digest))
+	} else {
+		log.DebugContext(ctx, "Built-in checks",
+			log.String("digest", digest), log.Int("major_version", ver))
+	}
 
 	// Update metadata.json with the new digest and the current date
-	if err = c.updateMetadata(digest, c.clock.Now()); err != nil {
+	if err = c.updateMetadata(Metadata{
+		Digest:       digest,
+		DownloadedAt: c.clock.Now(),
+		MajorVersion: &ver,
+		CustomBuild:  isCustomBundle,
+	}); err != nil {
 		return xerrors.Errorf("unable to update the check metadata: %w", err)
 	}
 
 	return nil
 }
 
-// LoadBuiltinPolicies loads default policies
-func (c *Client) LoadBuiltinPolicies() ([]string, error) {
-	f, err := os.Open(c.manifestPath())
+// BuiltinChecksPath returns default policies
+func (c *Client) BuiltinChecksPath() string {
+	return c.contentDir()
+}
+
+func (c *Client) getBundleMajorVersion(ctx context.Context) (ver int, err error) {
+	manifest, err := c.artifact.Manifest(ctx)
 	if err != nil {
-		return nil, xerrors.Errorf("manifest file open error (%s): %w", c.manifestPath(), err)
-	}
-	defer f.Close()
-
-	var manifest bundle.Manifest
-	if err = json.NewDecoder(f).Decode(&manifest); err != nil {
-		return nil, xerrors.Errorf("json decode error (%s): %w", c.manifestPath(), err)
+		return 0, err
 	}
 
-	// If the "roots" field is not included in the manifest it defaults to [""]
-	// which means that ALL data and check must come from the bundle.
-	if manifest.Roots == nil || len(*manifest.Roots) == 0 {
-		return []string{c.contentDir()}, nil
+	// No annotations → treat as custom build
+	if manifest.Annotations == nil {
+		return 0, nil
 	}
 
-	var policyPaths []string
-	for _, root := range *manifest.Roots {
-		policyPaths = append(policyPaths, filepath.Join(c.contentDir(), root))
+	v, ok := manifest.Annotations[VersionAnnotationKey]
+	if !ok || v == "" {
+		return 0, nil
 	}
 
-	return policyPaths, nil
+	version, err := semver.Parse(v)
+	if err != nil {
+		// Invalid version → treat as custom build
+		return 0, nil
+	}
+
+	majorPart, ok := version.Major().(part.Uint64)
+	if !ok {
+		// Could not extract major part → treat as custom build
+		return 0, nil
+	}
+
+	return int(majorPart), nil
 }
 
 // NeedsUpdate returns if the default check should be updated
 func (c *Client) NeedsUpdate(ctx context.Context, registryOpts types.RegistryOptions) (bool, error) {
-	meta, err := c.GetMetadata()
+	meta, err := c.GetMetadata(ctx)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			log.DebugContext(ctx, "Cache does not exist, will be created")
+		} else {
+			log.DebugContext(ctx,
+				"Invalidating cache: failed to get metadata", log.Err(err),
+			)
+		}
 		return true, nil
+	}
+
+	// For official builds, check the major version for cache invalidation.
+	// Custom builds may not have a version annotation, so MajorVersion is ignored.
+	// Old cache entries without a version will be invalidated once to enrich metadata.
+	if !meta.CustomBuild {
+
+		// Invalidate the old cache if it does not store the version.
+		if meta.MajorVersion == nil {
+			log.DebugContext(ctx,
+				"Invalidating cache: missing major version",
+				log.String("digest", meta.Digest),
+				log.Time("downloaded_at", meta.DownloadedAt),
+			)
+			return true, nil
+		}
+
+		// Invalidate the old cache if its version does not match.
+		if *meta.MajorVersion != BundleVersion {
+			log.DebugContext(ctx, "Invalidating cache: version mismatch",
+				log.Int("cached_major_version", *meta.MajorVersion),
+				log.Int("current_major_version", BundleVersion),
+			)
+			return true, nil
+		}
 	}
 
 	// No need to update if it's been within a day since the last update.
@@ -165,23 +237,29 @@ func (c *Client) NeedsUpdate(ctx context.Context, registryOpts types.RegistryOpt
 		return false, nil
 	}
 
-	if err = c.populateOCIArtifact(registryOpts); err != nil {
-		return false, xerrors.Errorf("OPA bundle error: %w", err)
-	}
-
+	c.initOCIArtifact(ctx, registryOpts)
 	digest, err := c.artifact.Digest(ctx)
 	if err != nil {
 		return false, xerrors.Errorf("digest error: %w", err)
 	}
 
 	if meta.Digest != digest {
+		log.DebugContext(ctx, "Invalidating cache: digest mismatch",
+			log.String("cached_digest", meta.Digest),
+			log.String("current_digest", digest),
+		)
 		return true, nil
 	}
 
 	// Update DownloadedAt with the current time.
 	// Otherwise, if there are no updates in the remote registry,
 	// the digest will be fetched every time even after this.
-	if err = c.updateMetadata(meta.Digest, time.Now()); err != nil {
+	if err = c.updateMetadata(Metadata{
+		Digest:       meta.Digest,
+		DownloadedAt: c.clock.Now(),
+		MajorVersion: meta.MajorVersion,
+		CustomBuild:  meta.CustomBuild,
+	}); err != nil {
 		return false, xerrors.Errorf("unable to update the check metadata: %w", err)
 	}
 
@@ -196,21 +274,12 @@ func (c *Client) metadataPath() string {
 	return filepath.Join(c.policyDir, "metadata.json")
 }
 
-func (c *Client) manifestPath() string {
-	return filepath.Join(c.contentDir(), bundle.ManifestExt)
-}
-
-func (c *Client) updateMetadata(digest string, now time.Time) error {
+func (c *Client) updateMetadata(meta Metadata) error {
 	f, err := os.Create(c.metadataPath())
 	if err != nil {
-		return xerrors.Errorf("failed to open a check manifest: %w", err)
+		return xerrors.Errorf("failed to open checks bundle metadata: %w", err)
 	}
 	defer f.Close()
-
-	meta := Metadata{
-		Digest:       digest,
-		DownloadedAt: now,
-	}
 
 	if err = json.NewEncoder(f).Encode(meta); err != nil {
 		return xerrors.Errorf("json encode error: %w", err)
@@ -219,17 +288,17 @@ func (c *Client) updateMetadata(digest string, now time.Time) error {
 	return nil
 }
 
-func (c *Client) GetMetadata() (*Metadata, error) {
+func (c *Client) GetMetadata(ctx context.Context) (*Metadata, error) {
 	f, err := os.Open(c.metadataPath())
 	if err != nil {
-		log.Debug("Failed to open the check metadata", log.Err(err))
+		log.DebugContext(ctx, "Failed to open the check metadata", log.Err(err))
 		return nil, err
 	}
 	defer f.Close()
 
 	var meta Metadata
 	if err = json.NewDecoder(f).Decode(&meta); err != nil {
-		log.Warn("Check metadata decode error", log.Err(err))
+		log.WarnContext(ctx, "Check metadata decode error", log.Err(err))
 		return nil, err
 	}
 

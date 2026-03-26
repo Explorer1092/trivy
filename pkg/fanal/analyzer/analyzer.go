@@ -12,14 +12,17 @@ import (
 	"sync"
 
 	"github.com/samber/lo"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 	"golang.org/x/xerrors"
 
 	fos "github.com/aquasecurity/trivy/pkg/fanal/analyzer/os"
 	"github.com/aquasecurity/trivy/pkg/fanal/types"
+	"github.com/aquasecurity/trivy/pkg/licensing"
 	"github.com/aquasecurity/trivy/pkg/log"
 	"github.com/aquasecurity/trivy/pkg/misconf"
 	xio "github.com/aquasecurity/trivy/pkg/x/io"
+	xslices "github.com/aquasecurity/trivy/pkg/x/slices"
 )
 
 var (
@@ -118,13 +121,20 @@ type CustomGroup interface {
 	Group() Group
 }
 
+// StaticPathAnalyzer is an interface for analyzers that can specify static file paths
+// instead of traversing the entire filesystem.
+type StaticPathAnalyzer interface {
+	// StaticPaths returns a list of static file paths to analyze
+	StaticPaths() []string
+}
+
 type Opener func() (xio.ReadSeekCloserAt, error)
 
 type AnalyzerGroup struct {
 	logger            *log.Logger
 	analyzers         []analyzer
 	postAnalyzers     []PostAnalyzer
-	filePatterns      map[Type][]*regexp.Regexp
+	filePatterns      map[Type]FilePatterns
 	detectionPriority types.DetectionPriority
 }
 
@@ -142,8 +152,20 @@ type AnalysisInput struct {
 }
 
 type PostAnalysisInput struct {
-	FS      fs.FS
-	Options AnalysisOptions
+	FS           fs.FS
+	FilePatterns FilePatterns
+	Options      AnalysisOptions
+}
+
+type FilePatterns []*regexp.Regexp
+
+func (f FilePatterns) Match(filePath string) bool {
+	for _, pattern := range f {
+		if pattern.MatchString(filePath) {
+			return true
+		}
+	}
+	return false
 }
 
 type AnalysisOptions struct {
@@ -216,9 +238,8 @@ func (r *AnalysisResult) Sort() {
 	sort.Slice(r.Misconfigurations, func(i, j int) bool {
 		if r.Misconfigurations[i].FileType != r.Misconfigurations[j].FileType {
 			return r.Misconfigurations[i].FileType < r.Misconfigurations[j].FileType
-		} else {
-			return r.Misconfigurations[i].FilePath < r.Misconfigurations[j].FilePath
 		}
+		return r.Misconfigurations[i].FilePath < r.Misconfigurations[j].FilePath
 	})
 
 	// Secrets
@@ -239,9 +260,8 @@ func (r *AnalysisResult) Sort() {
 		if r.Licenses[i].Type == r.Licenses[j].Type {
 			if r.Licenses[i].FilePath == r.Licenses[j].FilePath {
 				return r.Licenses[i].Layer.DiffID < r.Licenses[j].Layer.DiffID
-			} else {
-				return r.Licenses[i].FilePath < r.Licenses[j].FilePath
 			}
+			return r.Licenses[i].FilePath < r.Licenses[j].FilePath
 		}
 
 		return r.Licenses[i].Type < r.Licenses[j].Type
@@ -268,6 +288,7 @@ func (r *AnalysisResult) Merge(newResult *AnalysisResult) {
 	}
 
 	if len(newResult.Applications) > 0 {
+		normalizeApplicationsLicenses(newResult.Applications)
 		r.Applications = append(r.Applications, newResult.Applications...)
 	}
 
@@ -300,6 +321,43 @@ func (r *AnalysisResult) Merge(newResult *AnalysisResult) {
 	r.CustomResources = append(r.CustomResources, newResult.CustomResources...)
 }
 
+// setAnalyzedBy sets the AnalyzedBy field for all packages in the result.
+func (r *AnalysisResult) setAnalyzedBy(analyzerType Type) {
+	if r == nil {
+		return
+	}
+	for i := range r.PackageInfos {
+		for j := range r.PackageInfos[i].Packages {
+			r.PackageInfos[i].Packages[j].AnalyzedBy = analyzerType
+		}
+	}
+	for i := range r.Applications {
+		for j := range r.Applications[i].Packages {
+			r.Applications[i].Packages[j].AnalyzedBy = analyzerType
+		}
+	}
+}
+
+// analyze runs the analyzer and sets AnalyzedBy on the result.
+func (ag AnalyzerGroup) analyze(ctx context.Context, a analyzer, input AnalysisInput) (*AnalysisResult, error) {
+	result, err := a.Analyze(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	result.setAnalyzedBy(a.Type())
+	return result, nil
+}
+
+// postAnalyze runs the post-analyzer and sets AnalyzedBy on the result.
+func (ag AnalyzerGroup) postAnalyze(ctx context.Context, a PostAnalyzer, input PostAnalysisInput) (*AnalysisResult, error) {
+	result, err := a.PostAnalyze(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	result.setAnalyzedBy(a.Type())
+	return result, nil
+}
+
 func belongToGroup(groupName Group, analyzerType Type, disabledAnalyzers []Type, analyzer any) bool {
 	if slices.Contains(disabledAnalyzers, analyzerType) {
 		return false
@@ -316,6 +374,14 @@ func belongToGroup(groupName Group, analyzerType Type, disabledAnalyzers []Type,
 	return true
 }
 
+func normalizeApplicationsLicenses(applications []types.Application) {
+	for i, app := range applications {
+		for j, pkg := range app.Packages {
+			applications[i].Packages[j].Licenses = licensing.NormalizeLicenses(pkg.Licenses)
+		}
+	}
+}
+
 const separator = ":"
 
 func NewAnalyzerGroup(opts AnalyzerOptions) (AnalyzerGroup, error) {
@@ -326,7 +392,7 @@ func NewAnalyzerGroup(opts AnalyzerOptions) (AnalyzerGroup, error) {
 
 	group := AnalyzerGroup{
 		logger:            log.WithPrefix("analyzer"),
-		filePatterns:      make(map[Type][]*regexp.Regexp),
+		filePatterns:      make(map[Type]FilePatterns),
 		detectionPriority: opts.DetectionPriority,
 	}
 	for _, p := range opts.FilePatterns {
@@ -340,10 +406,6 @@ func NewAnalyzerGroup(opts AnalyzerOptions) (AnalyzerGroup, error) {
 		r, err := regexp.Compile(pattern)
 		if err != nil {
 			return group, xerrors.Errorf("invalid file regexp (%s): %w", p, err)
-		}
-
-		if _, ok := group.filePatterns[Type(fileType)]; !ok {
-			group.filePatterns[Type(fileType)] = []*regexp.Regexp{}
 		}
 
 		group.filePatterns[Type(fileType)] = append(group.filePatterns[Type(fileType)], r)
@@ -400,7 +462,7 @@ func (ag AnalyzerGroup) AnalyzerVersions() Versions {
 // AnalyzeFile determines which files are required by the analyzers based on the file name and attributes,
 // and passes only those files to the analyzer for analysis.
 // This function may be called concurrently and must be thread-safe.
-func (ag AnalyzerGroup) AnalyzeFile(ctx context.Context, wg *sync.WaitGroup, limit *semaphore.Weighted, result *AnalysisResult,
+func (ag AnalyzerGroup) AnalyzeFile(ctx context.Context, eg *errgroup.Group, limit *semaphore.Weighted, result *AnalysisResult,
 	dir, filePath string, info os.FileInfo, opener Opener, disabled []Type, opts AnalysisOptions) error {
 	if info.IsDir() {
 		return nil
@@ -415,7 +477,7 @@ func (ag AnalyzerGroup) AnalyzeFile(ctx context.Context, wg *sync.WaitGroup, lim
 			continue
 		}
 
-		if !ag.filePatternMatch(a.Type(), cleanPath) && !a.Required(cleanPath, info) {
+		if !ag.filePatterns[a.Type()].Match(cleanPath) && !a.Required(cleanPath, info) {
 			continue
 		}
 		rc, err := opener()
@@ -429,26 +491,32 @@ func (ag AnalyzerGroup) AnalyzeFile(ctx context.Context, wg *sync.WaitGroup, lim
 		if err = limit.Acquire(ctx, 1); err != nil {
 			return xerrors.Errorf("semaphore acquire: %w", err)
 		}
-		wg.Add(1)
 
-		go func(a analyzer, rc xio.ReadSeekCloserAt) {
+		eg.Go(func() error {
 			defer limit.Release(1)
-			defer wg.Done()
 			defer rc.Close()
 
-			ret, err := a.Analyze(ctx, AnalysisInput{
+			ret, analyzeErr := ag.analyze(ctx, a, AnalysisInput{
 				Dir:      dir,
 				FilePath: filePath,
 				Info:     info,
 				Content:  rc,
 				Options:  opts,
 			})
-			if err != nil && !errors.Is(err, fos.AnalyzeOSError) {
-				ag.logger.Debug("Analysis error", log.Err(err))
-				return
+			if analyzeErr != nil {
+				switch {
+				case errors.Is(analyzeErr, fos.AnalyzeOSError):
+					// The OS could not be detected.
+				case errors.Is(analyzeErr, context.DeadlineExceeded):
+					return xerrors.Errorf("analyzer timed out: %w", analyzeErr)
+				default:
+					ag.logger.Debug("Analysis error", log.Err(err))
+					return nil
+				}
 			}
 			result.Merge(ret)
-		}(a, rc)
+			return nil
+		})
 	}
 
 	return nil
@@ -461,7 +529,7 @@ func (ag AnalyzerGroup) RequiredPostAnalyzers(filePath string, info os.FileInfo)
 	}
 	var postAnalyzerTypes []Type
 	for _, a := range ag.postAnalyzers {
-		if ag.filePatternMatch(a.Type(), filePath) || a.Required(filePath, info) {
+		if ag.filePatterns[a.Type()].Match(filePath) || a.Required(filePath, info) {
 			postAnalyzerTypes = append(postAnalyzerTypes, a.Type())
 		}
 	}
@@ -472,7 +540,8 @@ func (ag AnalyzerGroup) RequiredPostAnalyzers(filePath string, info os.FileInfo)
 // and passes it to the respective post-analyzer.
 // The obtained results are merged into the "result".
 // This function may be called concurrently and must be thread-safe.
-func (ag AnalyzerGroup) PostAnalyze(ctx context.Context, compositeFS *CompositeFS, result *AnalysisResult, opts AnalysisOptions) error {
+func (ag AnalyzerGroup) PostAnalyze(ctx context.Context, compositeFS *CompositeFS, result *AnalysisResult,
+	opts AnalysisOptions) error {
 	for _, a := range ag.postAnalyzers {
 		fsys, ok := compositeFS.Get(a.Type())
 		if !ok {
@@ -502,9 +571,10 @@ func (ag AnalyzerGroup) PostAnalyze(ctx context.Context, compositeFS *CompositeF
 			return xerrors.Errorf("unable to filter filesystem: %w", err)
 		}
 
-		res, err := a.PostAnalyze(ctx, PostAnalysisInput{
-			FS:      filteredFS,
-			Options: opts,
+		res, err := ag.postAnalyze(ctx, a, PostAnalysisInput{
+			FS:           filteredFS,
+			FilePatterns: ag.filePatterns[a.Type()],
+			Options:      opts,
 		})
 		if err != nil {
 			return xerrors.Errorf("post analysis error: %w", err)
@@ -519,11 +589,39 @@ func (ag AnalyzerGroup) PostAnalyzerFS() (*CompositeFS, error) {
 	return NewCompositeFS()
 }
 
-func (ag AnalyzerGroup) filePatternMatch(analyzerType Type, filePath string) bool {
-	for _, pattern := range ag.filePatterns[analyzerType] {
-		if pattern.MatchString(filePath) {
-			return true
+// StaticPaths collects static paths from all enabled analyzers
+// It returns the collected paths and a boolean indicating if all enabled analyzers implement StaticPathAnalyzer
+func (ag AnalyzerGroup) StaticPaths(disabled []Type) ([]string, bool) {
+	var paths []string
+
+	type analyzerType interface{ Type() Type }
+	allAnalyzers := append(
+		xslices.Map(ag.analyzers, func(a analyzer) analyzerType { return a }),
+		xslices.Map(ag.postAnalyzers, func(a PostAnalyzer) analyzerType { return a })...,
+	)
+
+	for _, a := range allAnalyzers {
+		// Skip disabled analyzers
+		if slices.Contains(disabled, a.Type()) {
+			continue
 		}
+
+		// We can't be sure that the file pattern uses a static path.
+		// So we don't need to use `StaticPath` logic if any enabled analyzer has a file pattern.
+		if _, ok := ag.filePatterns[a.Type()]; ok {
+			return nil, false
+		}
+
+		// If any analyzer doesn't implement StaticPathAnalyzer, return false
+		staticPathAnalyzer, ok := a.(StaticPathAnalyzer)
+		if !ok {
+			return nil, false
+		}
+
+		// Collect paths from StaticPathAnalyzer
+		paths = append(paths, staticPathAnalyzer.StaticPaths()...)
 	}
-	return false
+
+	// Remove duplicates
+	return lo.Uniq(paths), true
 }

@@ -7,9 +7,10 @@ on:
       - 'mkdocs.yml'
       - 'LICENSE'
       - '.release-please-manifest.json' ## don't run tests for release-please PRs
+      - 'helm/trivy/Chart.yaml'
   merge_group:
-env:
-  GO_VERSION: '1.22'
+  workflow_dispatch:
+
 jobs:
   test:
     name: Test
@@ -18,12 +19,13 @@ jobs:
       matrix:
         operating-system: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4.1.6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
+        uses: ./.github/actions/setup-go
+
       - name: go mod tidy
         run: |
           go mod tidy
@@ -35,10 +37,13 @@ jobs:
 
       - name: Lint
         id: lint
-        uses: golangci/golangci-lint-action@v6.0.1
+        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
         with:
-          version: v1.59
-          args: --verbose --out-format=line-number
+          version: v2.10
+          args: --verbose
+          skip-save-cache: true  # Restore cache from main branch but don't save new cache
+        env:
+          GOEXPERIMENT: jsonv2
         if: matrix.operating-system == 'ubuntu-latest'
 
       - name: Check if linter failed
@@ -48,10 +53,7 @@ jobs:
         if: ${{ failure() && steps.lint.conclusion == 'failure' }}
 
       - name: Install tools
-        uses: aquaproj/aqua-installer@v3.0.1
-        with:
-          aqua_version: v1.25.0
-          aqua_opts: ""
+        run: go install tool # GOBIN is added to the PATH by the setup-go action
 
       - name: Check if CLI references are up-to-date
         run: |
@@ -70,17 +72,40 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out code into the Go module directory
-        uses: actions/checkout@v4.1.6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # GitHub runners were rolled back to Docker Engine v28, while tests rely on Docker Engine v29.
+      # This version mismatch leads to differences in image IDs and causes integration tests to fail.
+      # We explicitly install Docker Engine v29 to ensure consistent behavior.
+      # Remove this temporary solution when the issue is resolved.
+      # https://github.com/actions/runner-images/issues/13474
+      - name: Set up Docker
+        uses: docker/setup-docker-action@e43656e248c0bd0647d3f5c195d116aacf6fcaf4 # v4.7.0
+        with:
+          version: v29.2.1
+          set-host: true
 
       - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
+        uses: ./.github/actions/setup-go
 
-      - name: Install tools
-        uses: aquaproj/aqua-installer@v3.0.1
+      - name: Install Go tools
+        run: go install tool # GOBIN is added to the PATH by the setup-go action
+
+      - name: Generate image list digest
+        id: image-digest
+        run: |
+          source integration/testimages.ini
+          IMAGE_LIST=$(skopeo list-tags docker://$TEST_IMAGES)
+          DIGEST=$(echo "$IMAGE_LIST" | jq '.Tags += ["containerd"] | .Tags |= sort' | sha256sum | cut -d' ' -f1)
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+
+      - name: Restore test images from cache
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
-          aqua_version: v1.25.0
+          path: integration/testdata/fixtures/images
+          key: cache-test-images-${{ steps.image-digest.outputs.digest }}
 
       - name: Run integration tests
         run: mage test:integration
@@ -90,17 +115,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out code into the Go module directory
-        uses: actions/checkout@v4.1.6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
+        uses: ./.github/actions/setup-go
 
-      - name: Install tools
-        uses: aquaproj/aqua-installer@v3.0.1
-        with:
-          aqua_version: v1.25.0
+      - name: Install Go tools
+        run: go install tool # GOBIN is added to the PATH by the setup-go action
 
       - name: Run k8s integration tests
         run: mage test:k8s
@@ -110,17 +133,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4.1.6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
+        uses: ./.github/actions/setup-go
 
       - name: Install tools
-        uses: aquaproj/aqua-installer@v3.0.1
+        run: go install tool # GOBIN is added to the PATH by the setup-go action
+
+      - name: Generate image list digest
+        id: image-digest
+        run: |
+          source integration/testimages.ini
+          IMAGE_LIST=$(skopeo list-tags docker://$TEST_IMAGES)
+          DIGEST=$(echo "$IMAGE_LIST" | jq '.Tags += ["containerd"] | .Tags |= sort' | sha256sum | cut -d' ' -f1)
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+
+      - name: Restore test images from cache
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
-          aqua_version: v1.25.0
+          path: integration/testdata/fixtures/images
+          key: cache-test-images-${{ steps.image-digest.outputs.digest }}
 
       - name: Run module integration tests
         shell: bash
@@ -132,19 +167,51 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4.1.6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: ./.github/actions/setup-go
+
+      - name: Install Go tools
+        run: go install tool # GOBIN is added to the PATH by the setup-go action
+
+      - name: Generate image list digest
+        id: image-digest
+        run: |
+          source integration/testimages.ini
+          IMAGE_LIST=$(skopeo list-tags docker://$TEST_VM_IMAGES)
+          DIGEST=$(echo "$IMAGE_LIST" | jq '.Tags |= sort' | sha256sum | cut -d' ' -f1)
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+
+      - name: Restore test VM images from cache
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
-          go-version: ${{ env.GO_VERSION }}
-      - name: Install tools
-        uses: aquaproj/aqua-installer@v3.0.1
-        with:
-          aqua_version: v1.25.0
+          path: integration/testdata/fixtures/vm-images
+          key: cache-test-vm-images-${{ steps.image-digest.outputs.digest }}
+
       - name: Run vm integration tests
         run: |
           mage test:vm
+
+  e2e-test:
+    name: E2E Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+
+      - name: Install Go tools
+        run: go install tool # GOBIN is added to the PATH by the setup-go action
+
+      - name: Run E2E tests
+        run: mage test:e2e
 
   build-test:
     name: Build Test
@@ -155,13 +222,24 @@ jobs:
     env:
       DOCKER_CLI_EXPERIMENTAL: "enabled"
     steps:
+    # The go-build (GOCACHE env) directory requires a large amount of free disk space.
+    - name: Free up disk space
+      if: matrix.operating-system == 'ubuntu-latest'
+      run: |
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /opt/hostedtoolcache/CodeQL
+        sudo docker image prune --all --force
+        df -h
+
     - name: Checkout
-      uses: actions/checkout@v4.1.6
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        persist-credentials: false
 
     - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: ${{ env.GO_VERSION }}
+      uses: ./.github/actions/setup-go
 
     - name: Determine GoReleaser ID
       id: goreleaser_id
@@ -176,7 +254,23 @@ jobs:
         fi
 
     - name: Run GoReleaser
-      uses: goreleaser/goreleaser-action@v6
+      uses: goreleaser/goreleaser-action@ec59f474b9834571250b370d4735c50f8e2d1e29 # v7.0.0
       with:
         version: v2.1.0
         args: build --snapshot --clean --timeout 90m ${{ steps.goreleaser_id.outputs.id }}
+
+  # This job intentionally runs on all PRs (not scoped to .github/ path changes)
+  # to keep all checks in one place. The scan itself is scoped to .github/ via the action input.
+  zizmor:
+    name: Lint GitHub Actions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@71321a20a9ded102f6e9ce5718a2fcec2c4f70d8 # v0.5.2
+        with:
+          inputs: .github/
+          advanced-security: false

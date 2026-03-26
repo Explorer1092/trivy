@@ -14,10 +14,10 @@ import (
 )
 
 type Scanner struct {
-	parser    *parser.Parser
-	logger    *log.Logger
-	options   []options.ScannerOption
-	tfScanner *terraform.Scanner
+	inner   *terraform.Scanner
+	parser  *parser.Parser
+	logger  *log.Logger
+	options []options.ScannerOption
 }
 
 func (s *Scanner) Name() string {
@@ -37,7 +37,7 @@ func (s *Scanner) ScanFS(ctx context.Context, fsys fs.FS, dir string) (scan.Resu
 			return nil
 		}
 
-		res, err := s.ScanFile(path, fsys)
+		res, err := s.ScanFile(ctx, path, fsys)
 		if err != nil {
 			return fmt.Errorf("failed to scan %s: %w", path, err)
 		}
@@ -55,16 +55,18 @@ func (s *Scanner) ScanFS(ctx context.Context, fsys fs.FS, dir string) (scan.Resu
 
 func New(opts ...options.ScannerOption) *Scanner {
 	scanner := &Scanner{
-		options:   opts,
-		logger:    log.WithPrefix("tfjson scanner"),
-		parser:    parser.New(),
-		tfScanner: terraform.New(opts...),
+		inner: terraform.New(
+			append(opts, options.WithScanRawConfig(false))...,
+		),
+		parser:  parser.New(),
+		logger:  log.WithPrefix("tfjson scanner"),
+		options: opts,
 	}
 
 	return scanner
 }
 
-func (s *Scanner) ScanFile(filepath string, fsys fs.FS) (scan.Results, error) {
+func (s *Scanner) ScanFile(ctx context.Context, filepath string, fsys fs.FS) (scan.Results, error) {
 
 	s.logger.Debug("Scanning file", log.FilePath(filepath))
 	file, err := fsys.Open(filepath)
@@ -72,11 +74,10 @@ func (s *Scanner) ScanFile(filepath string, fsys fs.FS) (scan.Results, error) {
 		return nil, err
 	}
 	defer file.Close()
-	return s.Scan(file)
+	return s.Scan(ctx, file)
 }
 
-func (s *Scanner) Scan(reader io.Reader) (scan.Results, error) {
-
+func (s *Scanner) Scan(ctx context.Context, reader io.Reader) (scan.Results, error) {
 	planFile, err := s.parser.Parse(reader)
 	if err != nil {
 		return nil, err
@@ -87,5 +88,5 @@ func (s *Scanner) Scan(reader io.Reader) (scan.Results, error) {
 		return nil, fmt.Errorf("failed to convert plan to FS: %w", err)
 	}
 
-	return s.tfScanner.ScanFS(context.TODO(), planFS, ".")
+	return s.inner.ScanFS(ctx, planFS, ".")
 }

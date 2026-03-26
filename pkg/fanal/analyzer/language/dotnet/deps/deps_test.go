@@ -1,7 +1,6 @@
 package deps
 
 import (
-	"context"
 	"os"
 	"testing"
 
@@ -28,6 +27,18 @@ func Test_depsLibraryAnalyzer_Analyze(t *testing.T) {
 						Type:     types.DotNetCore,
 						FilePath: "testdata/datacollector.deps.json",
 						Packages: types.Packages{
+							{
+								ID:           "Microsoft.VisualStudio.TestPlatform.Common/17.2.0-release-20220408-11",
+								Name:         "Microsoft.VisualStudio.TestPlatform.Common",
+								Version:      "17.2.0-release-20220408-11",
+								Relationship: types.RelationshipRoot,
+								Locations: []types.Location{
+									{
+										StartLine: 15,
+										EndLine:   19,
+									},
+								},
+							},
 							{
 								ID:      "Newtonsoft.Json/9.0.1",
 								Name:    "Newtonsoft.Json",
@@ -57,15 +68,14 @@ func Test_depsLibraryAnalyzer_Analyze(t *testing.T) {
 			defer f.Close()
 
 			a := depsLibraryAnalyzer{}
-			ctx := context.Background()
+			ctx := t.Context()
 			got, err := a.Analyze(ctx, analyzer.AnalysisInput{
 				FilePath: tt.inputFile,
 				Content:  f,
 			})
 
 			if tt.wantErr != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.wantErr)
+				require.ErrorContains(t, err, tt.wantErr)
 				return
 			}
 

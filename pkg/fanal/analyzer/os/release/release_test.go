@@ -1,7 +1,6 @@
 package release
 
 import (
-	"context"
 	"os"
 	"testing"
 
@@ -20,6 +19,86 @@ func Test_osReleaseAnalyzer_Analyze(t *testing.T) {
 		want      *analyzer.AnalysisResult
 		wantErr   string
 	}{
+		{
+			name:      "ActiveState",
+			inputFile: "testdata/activestate",
+			want: &analyzer.AnalysisResult{
+				OS: types.OS{
+					Family: types.ActiveState,
+					Name:   "1.0",
+				},
+			},
+		},
+		{
+			name:      "Fedora",
+			inputFile: "testdata/fedora",
+			want: &analyzer.AnalysisResult{
+				OS: types.OS{
+					Family: types.Fedora,
+					Name:   "42",
+				},
+			},
+		},
+		{
+			name:      "Red Hat Enterprise Linux",
+			inputFile: "testdata/rhel",
+			want: &analyzer.AnalysisResult{
+				OS: types.OS{
+					Family: types.RedHat,
+					Name:   "9.4",
+				},
+			},
+		},
+		{
+			name:      "CentOS",
+			inputFile: "testdata/centos",
+			want: &analyzer.AnalysisResult{
+				OS: types.OS{
+					Family: types.CentOS,
+					Name:   "7",
+				},
+			},
+		},
+		{
+			name:      "CentOS Stream",
+			inputFile: "testdata/centos-stream",
+			want: &analyzer.AnalysisResult{
+				OS: types.OS{
+					Family: types.CentOSStream,
+					Name:   "8",
+				},
+			},
+		},
+		{
+			name:      "Rocky Linux",
+			inputFile: "testdata/rocky",
+			want: &analyzer.AnalysisResult{
+				OS: types.OS{
+					Family: types.Rocky,
+					Name:   "9.3",
+				},
+			},
+		},
+		{
+			name:      "AlmaLinux",
+			inputFile: "testdata/alma",
+			want: &analyzer.AnalysisResult{
+				OS: types.OS{
+					Family: types.Alma,
+					Name:   "9.4",
+				},
+			},
+		},
+		{
+			name:      "Oracle Linux",
+			inputFile: "testdata/oracle",
+			want: &analyzer.AnalysisResult{
+				OS: types.OS{
+					Family: types.Oracle,
+					Name:   "8.10",
+				},
+			},
+		},
 		{
 			name:      "alpine",
 			inputFile: "testdata/alpine",
@@ -67,6 +146,36 @@ func Test_osReleaseAnalyzer_Analyze(t *testing.T) {
 				OS: types.OS{
 					Family: types.SLES,
 					Name:   "15.3",
+				},
+			},
+		},
+		{
+			name:      "SUSE Linux Enterprise Micro",
+			inputFile: "testdata/slemicro",
+			want: &analyzer.AnalysisResult{
+				OS: types.OS{
+					Family: types.SLEMicro,
+					Name:   "5.3",
+				},
+			},
+		},
+		{
+			name:      "SUSE Linux Enterprise Micro 6.0",
+			inputFile: "testdata/slemicro6.0",
+			want: &analyzer.AnalysisResult{
+				OS: types.OS{
+					Family: types.SLEMicro,
+					Name:   "6.0",
+				},
+			},
+		},
+		{
+			name:      "SUSE Linux Enterprise Micro 5.4 for Rancher",
+			inputFile: "testdata/slemicro-rancher",
+			want: &analyzer.AnalysisResult{
+				OS: types.OS{
+					Family: types.SLEMicro,
+					Name:   "5.4",
 				},
 			},
 		},
@@ -121,6 +230,46 @@ func Test_osReleaseAnalyzer_Analyze(t *testing.T) {
 			},
 		},
 		{
+			name:      "Echo",
+			inputFile: "testdata/echo",
+			want: &analyzer.AnalysisResult{
+				OS: types.OS{
+					Family: types.Echo,
+					Name:   "1",
+				},
+			},
+		},
+		{
+			name:      "MinimOS",
+			inputFile: "testdata/minimos",
+			want: &analyzer.AnalysisResult{
+				OS: types.OS{
+					Family: types.MinimOS,
+					Name:   "20241031",
+				},
+			},
+		},
+		{
+			name:      "Bottlerocket",
+			inputFile: "testdata/bottlerocket",
+			want: &analyzer.AnalysisResult{
+				OS: types.OS{
+					Family: types.Bottlerocket,
+					Name:   "1.34.0",
+				},
+			},
+		},
+		{
+			name:      "CoreOS",
+			inputFile: "testdata/coreos",
+			want: &analyzer.AnalysisResult{
+				OS: types.OS{
+					Family: types.CoreOS,
+					Name:   "3.15.4",
+				},
+			},
+		},
+		{
 			name:      "Unknown OS",
 			inputFile: "testdata/unknown",
 			want:      nil,
@@ -144,7 +293,7 @@ func Test_osReleaseAnalyzer_Analyze(t *testing.T) {
 			defer f.Close()
 
 			a := osReleaseAnalyzer{}
-			res, err := a.Analyze(context.Background(), analyzer.AnalysisInput{
+			res, err := a.Analyze(t.Context(), analyzer.AnalysisInput{
 				FilePath: "etc/os-release",
 				Content:  f,
 			})

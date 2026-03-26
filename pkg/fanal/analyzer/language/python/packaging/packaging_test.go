@@ -1,7 +1,6 @@
 package packaging
 
 import (
-	"context"
 	"os"
 	"testing"
 
@@ -33,7 +32,7 @@ func Test_packagingAnalyzer_Analyze(t *testing.T) {
 							{
 								Name:     "distlib",
 								Version:  "0.3.1",
-								Licenses: []string{"Python-2.0"},
+								Licenses: []string{"Python license"},
 								FilePath: "distlib-0.3.1.egg-info/PKG-INFO",
 								Digest:   "sha1:d9d89d8ed3b2b683767c96814c9c5d3e57ef2e1b",
 							},
@@ -54,7 +53,7 @@ func Test_packagingAnalyzer_Analyze(t *testing.T) {
 							{
 								Name:     "setuptools",
 								Version:  "51.3.3",
-								Licenses: []string{"MIT"},
+								Licenses: []string{"MIT License"},
 								FilePath: "setuptools-51.3.3.egg-info/PKG-INFO",
 							},
 						},
@@ -74,7 +73,7 @@ func Test_packagingAnalyzer_Analyze(t *testing.T) {
 							{
 								Name:     "setuptools",
 								Version:  "51.3.3",
-								Licenses: []string{"MIT"},
+								Licenses: []string{"MIT License"},
 								FilePath: "setuptools-51.3.3.dist-info/METADATA",
 							},
 						},
@@ -94,7 +93,7 @@ func Test_packagingAnalyzer_Analyze(t *testing.T) {
 							{
 								Name:     "distlib",
 								Version:  "0.3.1",
-								Licenses: []string{"Python-2.0"},
+								Licenses: []string{"Python license"},
 								FilePath: "distlib-0.3.1.dist-info/METADATA",
 							},
 						},
@@ -133,7 +132,7 @@ func Test_packagingAnalyzer_Analyze(t *testing.T) {
 
 			a, err := newPackagingAnalyzer(analyzer.AnalyzerOptions{})
 			require.NoError(t, err)
-			got, err := a.PostAnalyze(context.Background(), analyzer.PostAnalysisInput{
+			got, err := a.PostAnalyze(t.Context(), analyzer.PostAnalysisInput{
 				FS: os.DirFS(tt.dir),
 				Options: analyzer.AnalysisOptions{
 					FileChecksum: tt.includeChecksum,
@@ -141,8 +140,7 @@ func Test_packagingAnalyzer_Analyze(t *testing.T) {
 			})
 
 			if tt.wantErr != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.wantErr)
+				require.ErrorContains(t, err, tt.wantErr)
 				return
 			}
 			require.NoError(t, err)
@@ -161,6 +159,11 @@ func Test_packagingAnalyzer_Required(t *testing.T) {
 		{
 			name:     "egg",
 			filePath: "python2.7/site-packages/cssutils-1.0-py2.7.egg/EGG-INFO/PKG-INFO",
+			want:     true,
+		},
+		{
+			name:     "egg-info/METADATA",
+			filePath: "Amazon/AWSCLIV2/cryptography-3.3.2-py3.8.egg-info/METADATA",
 			want:     true,
 		},
 		{

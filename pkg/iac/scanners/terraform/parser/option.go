@@ -4,6 +4,8 @@ import (
 	"io/fs"
 
 	"github.com/zclconf/go-cty/cty"
+
+	"github.com/aquasecurity/trivy/pkg/log"
 )
 
 type Option func(p *Parser)
@@ -17,6 +19,18 @@ func OptionWithTFVarsPaths(paths ...string) Option {
 func OptionStopOnHCLError(stop bool) Option {
 	return func(p *Parser) {
 		p.stopOnHCLError = stop
+	}
+}
+
+func OptionWithLogger(log *log.Logger) Option {
+	return func(p *Parser) {
+		p.logger = log
+	}
+}
+
+func OptionWithWorkingDirectoryPath(cwd string) Option {
+	return func(p *Parser) {
+		p.cwd = cwd
 	}
 }
 
@@ -47,5 +61,17 @@ func OptionWithSkipCachedModules(b bool) Option {
 func OptionWithConfigsFS(fsys fs.FS) Option {
 	return func(p *Parser) {
 		p.configsFS = fsys
+	}
+}
+
+func OptionWithSkipFiles(files []string) Option {
+	return func(p *Parser) {
+		p.skipPaths = files
+	}
+}
+
+func OptionWithSkipDirs(dirs []string) Option {
+	return func(p *Parser) {
+		p.skipPaths = dirs
 	}
 }

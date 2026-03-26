@@ -1,7 +1,6 @@
 package cyclonedx_test
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -15,7 +14,6 @@ import (
 	dtypes "github.com/aquasecurity/trivy-db/pkg/types"
 	"github.com/aquasecurity/trivy-db/pkg/vulnsrc/vulnerability"
 	"github.com/aquasecurity/trivy/pkg/clock"
-	"github.com/aquasecurity/trivy/pkg/fanal/artifact"
 	ftypes "github.com/aquasecurity/trivy/pkg/fanal/types"
 	"github.com/aquasecurity/trivy/pkg/report"
 	"github.com/aquasecurity/trivy/pkg/sbom/core"
@@ -64,9 +62,9 @@ var (
 	}
 )
 
-func TestMarshaler_MarshalReport(t *testing.T) {
-	testSBOM := core.NewBOM(core.Options{GenerateBOMRef: true})
-	testSBOM.AddComponent(&core.Component{
+var (
+	// Add root component
+	rootComponent = &core.Component{
 		Root: true,
 		Type: core.TypeApplication,
 		Name: "jackson-databind-2.13.4.1.jar",
@@ -79,7 +77,62 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 				Value: "2",
 			},
 		},
-	})
+	}
+
+	jacksonComponent = &core.Component{
+		Type:    core.TypeLibrary,
+		Name:    "jackson-databind",
+		Group:   "com.fasterxml.jackson.core",
+		Version: "2.13.4.1",
+		PkgIdentifier: ftypes.PkgIdentifier{
+			BOMRef: "pkg:maven/com.fasterxml.jackson.core/jackson-databind@2.13.4.1",
+			PURL: &packageurl.PackageURL{
+				Type:      packageurl.TypeMaven,
+				Namespace: "com.fasterxml.jackson.core",
+				Name:      "jackson-databind",
+				Version:   "2.13.4.1",
+			},
+		},
+		Properties: []core.Property{
+			{
+				Name:  core.PropertyPkgType,
+				Value: "jar",
+			},
+			{
+				Name:  core.PropertyFilePath,
+				Value: "jackson-databind-2.13.4.1.jar",
+			},
+		},
+	}
+)
+
+func testSBOM() *core.BOM {
+	sbom := core.NewBOM(core.Options{GenerateBOMRef: true})
+
+	// Add root component
+	sbom.AddComponent(rootComponent)
+
+	// Add the jackson-databind component that matches scan results
+	sbom.AddComponent(jacksonComponent)
+
+	// Establish relationships
+	sbom.AddRelationship(rootComponent, jacksonComponent, core.RelationshipContains)
+	sbom.AddRelationship(jacksonComponent, nil, core.RelationshipDependsOn)
+	return sbom
+}
+
+func testSBOMWithoutRoot() *core.BOM {
+	sbom := core.NewBOM(core.Options{GenerateBOMRef: true})
+
+	// Add the jackson-databind component that matches scan results
+	sbom.AddComponent(jacksonComponent)
+
+	// Establish relationships
+	sbom.AddRelationship(jacksonComponent, nil, core.RelationshipDependsOn)
+	return sbom
+}
+
+func TestMarshaler_MarshalReport(t *testing.T) {
 
 	tests := []struct {
 		name        string
@@ -91,7 +144,7 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 			inputReport: types.Report{
 				SchemaVersion: report.SchemaVersion,
 				ArtifactName:  "rails:latest",
-				ArtifactType:  artifact.TypeContainerImage,
+				ArtifactType:  ftypes.TypeContainerImage,
 				Metadata: types.Metadata{
 					Size: 1024,
 					OS: &ftypes.OS{
@@ -289,13 +342,16 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 								Name:    "trivy",
 								Group:   "aquasecurity",
 								Version: "dev",
+								Manufacturer: &cdx.OrganizationalEntity{
+									Name: "Aqua Security Software Ltd.",
+								},
 							},
 						},
 					},
 					Component: &cdx.Component{
 						Type:       cdx.ComponentTypeContainer,
-						BOMRef:     "pkg:oci/rails@sha256%3Aa27fd8080b517143cbbbab9dfb7c8571c40d67d534bbdee55bd6c473f432b177?arch=arm64&repository_url=index.docker.io%2Flibrary%2Frails",
-						PackageURL: "pkg:oci/rails@sha256%3Aa27fd8080b517143cbbbab9dfb7c8571c40d67d534bbdee55bd6c473f432b177?arch=arm64&repository_url=index.docker.io%2Flibrary%2Frails",
+						BOMRef:     "pkg:oci/rails@sha256:a27fd8080b517143cbbbab9dfb7c8571c40d67d534bbdee55bd6c473f432b177?arch=arm64&repository_url=index.docker.io%2Flibrary%2Frails",
+						PackageURL: "pkg:oci/rails@sha256:a27fd8080b517143cbbbab9dfb7c8571c40d67d534bbdee55bd6c473f432b177?arch=arm64&repository_url=index.docker.io%2Flibrary%2Frails",
 						Name:       "rails:latest",
 						Properties: &[]cdx.Property{
 							{
@@ -511,7 +567,7 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 						Licenses: &cdx.Licenses{
 							cdx.LicenseChoice{
 								License: &cdx.License{
-									Name: "GPLv3+",
+									ID: "GPL-3.0-or-later",
 								},
 							},
 						},
@@ -559,7 +615,6 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 					{
 						Ref: "3ff14136-e09f-4df9-80ea-000000000004",
 						Dependencies: &[]string{
-							"3ff14136-e09f-4df9-80ea-000000000005",
 							"pkg:gem/actioncontroller@7.0.0",
 						},
 					},
@@ -609,7 +664,7 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 						Dependencies: lo.ToPtr([]string{}),
 					},
 					{
-						Ref: "pkg:oci/rails@sha256%3Aa27fd8080b517143cbbbab9dfb7c8571c40d67d534bbdee55bd6c473f432b177?arch=arm64&repository_url=index.docker.io%2Flibrary%2Frails",
+						Ref: "pkg:oci/rails@sha256:a27fd8080b517143cbbbab9dfb7c8571c40d67d534bbdee55bd6c473f432b177?arch=arm64&repository_url=index.docker.io%2Flibrary%2Frails",
 						Dependencies: &[]string{
 							"3ff14136-e09f-4df9-80ea-000000000002",
 							"3ff14136-e09f-4df9-80ea-000000000004",
@@ -693,7 +748,7 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 			inputReport: types.Report{
 				SchemaVersion: report.SchemaVersion,
 				ArtifactName:  "centos:latest",
-				ArtifactType:  artifact.TypeContainerImage,
+				ArtifactType:  ftypes.TypeContainerImage,
 				Metadata: types.Metadata{
 					Size: 1024,
 					OS: &ftypes.OS{
@@ -926,6 +981,9 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 								Name:    "trivy",
 								Group:   "aquasecurity",
 								Version: "dev",
+								Manufacturer: &cdx.OrganizationalEntity{
+									Name: "Aqua Security Software Ltd.",
+								},
 							},
 						},
 					},
@@ -1029,7 +1087,7 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 						Licenses: &cdx.Licenses{
 							cdx.LicenseChoice{
 								License: &cdx.License{
-									Name: "GPLv2+",
+									ID: "GPL-2.0-or-later",
 								},
 							},
 						},
@@ -1075,7 +1133,7 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 						Licenses: &cdx.Licenses{
 							cdx.LicenseChoice{
 								License: &cdx.License{
-									Name: "GPLv2+",
+									ID: "GPL-2.0-or-later",
 								},
 							},
 						},
@@ -1123,8 +1181,6 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 						Ref: "3ff14136-e09f-4df9-80ea-000000000002",
 						Dependencies: &[]string{
 							"pkg:rpm/centos/acl@2.2.53-1.el8?arch=aarch64&distro=centos-8.3.2011&epoch=1",
-							// Trivy is unable to identify the direct OS packages as of today.
-							"pkg:rpm/centos/glibc@2.28-151.el8?arch=aarch64&distro=centos-8.3.2011",
 						},
 					},
 					{
@@ -1232,7 +1288,7 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 			inputReport: types.Report{
 				SchemaVersion: report.SchemaVersion,
 				ArtifactName:  "masahiro331/CVE-2021-41098",
-				ArtifactType:  artifact.TypeFilesystem,
+				ArtifactType:  ftypes.TypeFilesystem,
 				Results: types.Results{
 					{
 						Target: "Gemfile.lock",
@@ -1313,6 +1369,9 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 								Name:    "trivy",
 								Group:   "aquasecurity",
 								Version: "dev",
+								Manufacturer: &cdx.OrganizationalEntity{
+									Name: "Aqua Security Software Ltd.",
+								},
 							},
 						},
 					},
@@ -1451,7 +1510,7 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 			inputReport: types.Report{
 				SchemaVersion: report.SchemaVersion,
 				ArtifactName:  "./report.cdx.json",
-				ArtifactType:  artifact.TypeCycloneDX,
+				ArtifactType:  ftypes.TypeCycloneDX,
 				Results: types.Results{
 					{
 						Target: "Java",
@@ -1508,28 +1567,30 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 									},
 									CVSS: dtypes.VendorCVSS{
 										vulnerability.GHSA: dtypes.CVSS{
-											V3Vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
-											V3Score:  7.5,
+											V3Vector:  "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+											V3Score:   7.5,
+											V40Vector: "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+											V40Score:  8.7,
 										},
 									},
 									References: []string{
 										"https://access.redhat.com/security/cve/CVE-2022-42003",
 									},
-									PublishedDate:    lo.ToPtr(time.Date(2022, 10, 02, 05, 15, 0, 0, time.UTC)),
+									PublishedDate:    lo.ToPtr(time.Date(2022, 10, 2, 5, 15, 0, 0, time.UTC)),
 									LastModifiedDate: lo.ToPtr(time.Date(2022, 12, 20, 10, 15, 0, 0, time.UTC)),
 								},
 							},
 						},
 					},
 				},
-				BOM: testSBOM,
+				BOM: testSBOM(),
 			},
 			want: &cdx.BOM{
 				XMLNS:        "http://cyclonedx.org/schema/bom/1.6",
 				BOMFormat:    "CycloneDX",
 				SpecVersion:  cdx.SpecVersion1_6,
 				JSONSchema:   "http://cyclonedx.org/schema/bom-1.6.schema.json",
-				SerialNumber: "urn:uuid:3ff14136-e09f-4df9-80ea-000000000002",
+				SerialNumber: "urn:uuid:3ff14136-e09f-4df9-80ea-000000000001",
 				Version:      1,
 				Metadata: &cdx.Metadata{
 					Timestamp: "2021-08-25T12:20:30+00:00",
@@ -1540,6 +1601,9 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 								Name:    "trivy",
 								Group:   "aquasecurity",
 								Version: "dev",
+								Manufacturer: &cdx.OrganizationalEntity{
+									Name: "Aqua Security Software Ltd.",
+								},
 							},
 						},
 					},
@@ -1593,6 +1657,15 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 								Method:   cdx.ScoringMethodCVSSv31,
 								Vector:   "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
 							},
+							{
+								Source: &cdx.Source{
+									Name: string(vulnerability.GHSA),
+								},
+								Score:    lo.ToPtr(8.7),
+								Severity: cdx.SeverityHigh,
+								Method:   cdx.ScoringMethodCVSSv4,
+								Vector:   "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+							},
 						},
 						Description: "In FasterXML jackson-databind before versions 2.13.4.1 and 2.12.17.1, resource exhaustion can occur because of a lack of a check in primitive value deserializers to avoid deep wrapper array nesting, when the UNWRAP_SINGLE_VALUE_ARRAYS feature is enabled.",
 						Advisories: &[]cdx.Advisory{
@@ -1637,7 +1710,7 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 			inputReport: types.Report{
 				SchemaVersion: report.SchemaVersion,
 				ArtifactName:  "CVE-2023-34468",
-				ArtifactType:  artifact.TypeFilesystem,
+				ArtifactType:  ftypes.TypeFilesystem,
 				Results: types.Results{
 					{
 						Target: "Java",
@@ -1722,7 +1795,7 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 										"https://github.com/advisories/GHSA-xm2m-2q6h-22jw",
 									},
 									PublishedDate:    lo.ToPtr(time.Date(2023, 6, 12, 16, 15, 0, 0, time.UTC)),
-									LastModifiedDate: lo.ToPtr(time.Date(2023, 6, 21, 02, 20, 0, 0, time.UTC)),
+									LastModifiedDate: lo.ToPtr(time.Date(2023, 6, 21, 2, 20, 0, 0, time.UTC)),
 								},
 							},
 							{
@@ -1773,7 +1846,7 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 										"https://github.com/advisories/GHSA-xm2m-2q6h-22jw",
 									},
 									PublishedDate:    lo.ToPtr(time.Date(2023, 6, 12, 16, 15, 0, 0, time.UTC)),
-									LastModifiedDate: lo.ToPtr(time.Date(2023, 6, 21, 02, 20, 0, 0, time.UTC)),
+									LastModifiedDate: lo.ToPtr(time.Date(2023, 6, 21, 2, 20, 0, 0, time.UTC)),
 								},
 							},
 						},
@@ -1796,6 +1869,9 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 								Name:    "trivy",
 								Group:   "aquasecurity",
 								Version: "dev",
+								Manufacturer: &cdx.OrganizationalEntity{
+									Name: "Aqua Security Software Ltd.",
+								},
 							},
 						},
 					},
@@ -1938,7 +2014,7 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 			inputReport: types.Report{
 				SchemaVersion: report.SchemaVersion,
 				ArtifactName:  "test-aggregate",
-				ArtifactType:  artifact.TypeRepository,
+				ArtifactType:  ftypes.TypeRepository,
 				Results: types.Results{
 					{
 						Target: "Node.js",
@@ -1983,6 +2059,9 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 								Name:    "trivy",
 								Group:   "aquasecurity",
 								Version: "dev",
+								Manufacturer: &cdx.OrganizationalEntity{
+									Name: "Aqua Security Software Ltd.",
+								},
 							},
 						},
 					},
@@ -2008,7 +2087,7 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 						Licenses: &cdx.Licenses{
 							cdx.LicenseChoice{
 								License: &cdx.License{
-									Name: "MIT",
+									ID: "MIT",
 								},
 							},
 						},
@@ -2052,7 +2131,7 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 			inputReport: types.Report{
 				SchemaVersion: report.SchemaVersion,
 				ArtifactName:  "empty/path",
-				ArtifactType:  artifact.TypeFilesystem,
+				ArtifactType:  ftypes.TypeFilesystem,
 				Results:       types.Results{},
 			},
 			want: &cdx.BOM{
@@ -2071,6 +2150,9 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 								Name:    "trivy",
 								Group:   "aquasecurity",
 								Version: "dev",
+								Manufacturer: &cdx.OrganizationalEntity{
+									Name: "Aqua Security Software Ltd.",
+								},
 							},
 						},
 					},
@@ -2096,16 +2178,263 @@ func TestMarshaler_MarshalReport(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "happy path. Root component doesn't exist",
+			inputReport: types.Report{
+				SchemaVersion: report.SchemaVersion,
+				ArtifactName:  "empty/path",
+				ArtifactType:  ftypes.TypeFilesystem,
+				Results:       types.Results{},
+				BOM:           testSBOMWithoutRoot(),
+			},
+			want: &cdx.BOM{
+				XMLNS:        "http://cyclonedx.org/schema/bom/1.6",
+				BOMFormat:    "CycloneDX",
+				SpecVersion:  cdx.SpecVersion1_6,
+				JSONSchema:   "http://cyclonedx.org/schema/bom-1.6.schema.json",
+				SerialNumber: "urn:uuid:3ff14136-e09f-4df9-80ea-000000000001",
+				Version:      1,
+				Metadata: &cdx.Metadata{
+					Timestamp: "2021-08-25T12:20:30+00:00",
+					Tools: &cdx.ToolsChoice{
+						Components: &[]cdx.Component{
+							{
+								Type:    cdx.ComponentTypeApplication,
+								Name:    "trivy",
+								Group:   "aquasecurity",
+								Version: "dev",
+								Manufacturer: &cdx.OrganizationalEntity{
+									Name: "Aqua Security Software Ltd.",
+								},
+							},
+						},
+					},
+				},
+				Components: &[]cdx.Component{
+					{
+						BOMRef:     "pkg:maven/com.fasterxml.jackson.core/jackson-databind@2.13.4.1",
+						Type:       cdx.ComponentTypeLibrary,
+						Group:      "com.fasterxml.jackson.core",
+						Name:       "jackson-databind",
+						Version:    "2.13.4.1",
+						PackageURL: "pkg:maven/com.fasterxml.jackson.core/jackson-databind@2.13.4.1",
+						Properties: &[]cdx.Property{
+							{
+								Name:  "aquasecurity:trivy:FilePath",
+								Value: "jackson-databind-2.13.4.1.jar",
+							},
+							{
+								Name:  "aquasecurity:trivy:PkgType",
+								Value: "jar",
+							},
+						},
+					},
+				},
+				Vulnerabilities: &[]cdx.Vulnerability{},
+				Dependencies: &[]cdx.Dependency{
+					{
+						Ref:          "pkg:maven/com.fasterxml.jackson.core/jackson-databind@2.13.4.1",
+						Dependencies: lo.ToPtr([]string{}),
+					},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := clock.With(context.Background(), time.Date(2021, 8, 25, 12, 20, 30, 5, time.UTC))
+			ctx := clock.With(t.Context(), time.Date(2021, 8, 25, 12, 20, 30, 5, time.UTC))
 			uuid.SetFakeUUID(t, "3ff14136-e09f-4df9-80ea-%012d")
 
 			marshaler := cyclonedx.NewMarshaler("dev")
 			got, err := marshaler.MarshalReport(ctx, tt.inputReport)
 			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestMarshaler_Licenses(t *testing.T) {
+	tests := []struct {
+		name     string
+		licenses []string
+		want     *cdx.Licenses
+	}{
+		{
+			name: "SPDX ID",
+			licenses: []string{
+				"MIT",
+			},
+			want: &cdx.Licenses{
+				cdx.LicenseChoice{
+					License: &cdx.License{
+						ID: "MIT",
+					},
+				},
+			},
+		},
+		{
+			name: "Unknown SPDX ID",
+			licenses: []string{
+				"no-spdx-id-license",
+			},
+			want: &cdx.Licenses{
+				cdx.LicenseChoice{
+					License: &cdx.License{
+						Name: "no-spdx-id-license",
+					},
+				},
+			},
+		},
+		{
+			name: "text license",
+			licenses: []string{
+				"text://text of license",
+			},
+			want: &cdx.Licenses{
+				cdx.LicenseChoice{
+					License: &cdx.License{
+						Name: "text of license",
+					},
+				},
+			},
+		},
+		{
+			name: "SPDX license with exception",
+			licenses: []string{
+				"AFL 2.0 with Linux-syscall-note",
+			},
+			want: &cdx.Licenses{
+				cdx.LicenseChoice{
+					Expression: "AFL-2.0 WITH Linux-syscall-note",
+				},
+			},
+		},
+		{
+			name: "SPDX license with wrong exception",
+			licenses: []string{
+				"GPL-2.0-with-autoconf-exception+",
+			},
+			want: &cdx.Licenses{
+				cdx.LicenseChoice{
+					License: &cdx.License{
+						Name: "GPL-2.0-only WITH autoconf-exception+",
+					},
+				},
+			},
+		},
+		{
+			name: "SPDX expression",
+			licenses: []string{
+				"GPL-3.0-only OR AFL 2.0 with Linux-syscall-note AND GPL-3.0-only",
+			},
+			want: &cdx.Licenses{
+				cdx.LicenseChoice{
+					Expression: "GPL-3.0-only OR AFL-2.0 WITH Linux-syscall-note AND GPL-3.0-only",
+				},
+			},
+		},
+		{
+			name: "invalid SPDX expression",
+			licenses: []string{
+				"wrong-spdx-id OR GPL-3.0-only",
+			},
+			want: &cdx.Licenses{
+				cdx.LicenseChoice{
+					License: &cdx.License{
+						Name: "wrong-spdx-id OR GPL-3.0-only",
+					},
+				},
+			},
+		},
+		{
+			name: "multiple SPDX IDs",
+			licenses: []string{
+				"AFL 2.0 with Linux-syscall-note",
+				"GPL-3.0-only OR MIT",
+			},
+			want: &cdx.Licenses{
+				cdx.LicenseChoice{
+					Expression: "AFL-2.0 WITH Linux-syscall-note AND GPL-3.0-only OR MIT",
+				},
+			},
+		},
+		{
+			name: "multiple SPDX expressions",
+			licenses: []string{
+				"MIT",
+				"AFL 2.0",
+			},
+			want: &cdx.Licenses{
+				cdx.LicenseChoice{
+					License: &cdx.License{
+						ID: "MIT",
+					},
+				},
+				cdx.LicenseChoice{
+					License: &cdx.License{
+						ID: "AFL-2.0",
+					},
+				},
+			},
+		},
+		{
+			name: "SPDX ID + license name",
+			licenses: []string{
+				"MIT",
+				"license-name",
+			},
+			want: &cdx.Licenses{
+				cdx.LicenseChoice{
+					License: &cdx.License{
+						ID: "MIT",
+					},
+				},
+				cdx.LicenseChoice{
+					License: &cdx.License{
+						Name: "license-name",
+					},
+				},
+			},
+		},
+		{
+			name: "SPDX ID + SPDX exception",
+			licenses: []string{
+				"MIT",
+				"AFL 2.0 with Linux-Syscall-Note",
+			},
+			want: &cdx.Licenses{
+				cdx.LicenseChoice{
+					Expression: "MIT AND AFL-2.0 WITH Linux-syscall-note",
+				},
+			},
+		},
+		{
+			name: "license normalization error",
+			licenses: []string{
+				"Copyright (c) 2000, 2025, Oracle and/or its affiliates. Under GPLv2 license as shown in the Description field.",
+			},
+			want: &cdx.Licenses{
+				cdx.LicenseChoice{
+					License: &cdx.License{
+						Name: "Copyright (c) 2000, 2025, Oracle and/or its affiliates. Under GPLv2 license as shown in the Description field.",
+					},
+				},
+			},
+		},
+		{
+			name: "empty license",
+			licenses: []string{
+				"",
+			},
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			marshaler := cyclonedx.NewMarshaler("dev")
+			got := marshaler.Licenses(tt.licenses)
 			assert.Equal(t, tt.want, got)
 		})
 	}

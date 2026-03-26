@@ -5,19 +5,35 @@ import (
 
 	v1 "github.com/google/go-containerregistry/pkg/v1" // nolint: goimports
 
-	"github.com/aquasecurity/trivy/pkg/fanal/artifact"
+	"github.com/aquasecurity/trivy/pkg/fanal/image/name"
 	ftypes "github.com/aquasecurity/trivy/pkg/fanal/types"
 	"github.com/aquasecurity/trivy/pkg/sbom/core"
 )
 
+// TrivyInfo contains Trivy-specific information
+type TrivyInfo struct {
+	Version string      `json:",omitempty"` // Client version
+	Server  VersionInfo `json:",omitzero"`  // Server info (client/server mode only)
+}
+
 // Report represents a scan result
 type Report struct {
-	SchemaVersion int           `json:",omitempty"`
-	CreatedAt     time.Time     `json:",omitempty"`
-	ArtifactName  string        `json:",omitempty"`
-	ArtifactType  artifact.Type `json:",omitempty"`
-	Metadata      Metadata      `json:",omitempty"`
-	Results       Results       `json:",omitempty"`
+	SchemaVersion int       `json:",omitempty"`
+	Trivy         TrivyInfo `json:",omitzero"`
+	ReportID      string    `json:",omitempty"` // Unique identifier for this scan report
+	CreatedAt     time.Time `json:",omitzero"`
+
+	// ArtifactID uniquely identifies the scanned artifact.
+	// For container images: hash(ImageID + Registry + Repository) - ensures same image in different repos have different IDs
+	// For repositories: hash(RepoURL + Commit) or hash(Path + Commit) for local repos
+	// For filesystems: empty string
+	// For other artifact types: empty string
+	ArtifactID string `json:",omitempty"`
+
+	ArtifactName string              `json:",omitempty"`
+	ArtifactType ftypes.ArtifactType `json:",omitempty"`
+	Metadata     Metadata            `json:",omitzero"`
+	Results      Results             `json:",omitempty"`
 
 	// parsed SBOM
 	BOM *core.BOM `json:"-"` // Just for internal usage, not exported in JSON
@@ -29,11 +45,22 @@ type Metadata struct {
 	OS   *ftypes.OS `json:",omitempty"`
 
 	// Container image
-	ImageID     string        `json:",omitempty"`
-	DiffIDs     []string      `json:",omitempty"`
-	RepoTags    []string      `json:",omitempty"`
-	RepoDigests []string      `json:",omitempty"`
-	ImageConfig v1.ConfigFile `json:",omitempty"`
+	ImageID     string         `json:",omitempty"`
+	DiffIDs     []string       `json:",omitempty"`
+	RepoTags    []string       `json:",omitempty"`
+	RepoDigests []string       `json:",omitempty"`
+	Reference   name.Reference `json:",omitzero"`
+	ImageConfig v1.ConfigFile  `json:",omitzero"`
+	Layers      ftypes.Layers  `json:",omitzero"`
+
+	// Git repository
+	RepoURL   string   `json:",omitzero"`
+	Branch    string   `json:",omitzero"`
+	Tags      []string `json:",omitzero"`
+	Commit    string   `json:",omitzero"`
+	CommitMsg string   `json:",omitzero"`
+	Author    string   `json:",omitzero"`
+	Committer string   `json:",omitzero"`
 }
 
 // Results to hold list of Result
@@ -74,6 +101,15 @@ const (
 	FormatCosignVuln Format = "cosign-vuln"
 )
 
+var BuiltInK8sCompliances = []string{
+	ComplianceK8sNsa10,
+	ComplianceK8sCIS123,
+	ComplianceEksCIS14,
+	ComplianceRke2CIS124,
+	ComplianceK8sPSSBaseline01,
+	ComplianceK8sPSSRestricted01,
+}
+
 var (
 	SupportedFormats = []Format{
 		FormatTable,
@@ -105,6 +141,18 @@ var (
 	}
 )
 
+type TableMode string
+
+const (
+	Summary  TableMode = "summary"
+	Detailed TableMode = "detailed"
+)
+
+var SupportedTableModes = []TableMode{
+	Summary,
+	Detailed,
+}
+
 // Result holds a target and detected vulnerabilities
 type Result struct {
 	Target            string                     `json:"Target"`
@@ -130,13 +178,12 @@ func (r *Result) IsEmpty() bool {
 }
 
 type MisconfSummary struct {
-	Successes  int
-	Failures   int
-	Exceptions int
+	Successes int
+	Failures  int
 }
 
 func (s MisconfSummary) Empty() bool {
-	return s.Successes == 0 && s.Failures == 0 && s.Exceptions == 0
+	return s.Successes == 0 && s.Failures == 0
 }
 
 // Failed returns whether the result includes any vulnerabilities, misconfigurations or secrets

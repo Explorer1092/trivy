@@ -1,6 +1,7 @@
 package apigateway
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -72,7 +73,7 @@ resource "aws_apigatewayv2_domain_name" "example" {
 								{
 									Methods: []v1.Method{
 										{
-											HTTPMethod:        String("GET"),
+											HTTPMethod:        String(http.MethodGet),
 											AuthorizationType: String("NONE"),
 											APIKeyRequired:    Bool(false),
 										},
@@ -124,15 +125,15 @@ resource "aws_apigatewayv2_domain_name" "example" {
 }
 
 func Int(i int) iacTypes.IntValue {
-	return iacTypes.Int(i, iacTypes.NewTestMetadata())
+	return iacTypes.IntTest(i)
 }
 
 func Bool(b bool) iacTypes.BoolValue {
-	return iacTypes.Bool(b, iacTypes.NewTestMetadata())
+	return iacTypes.BoolTest(b)
 }
 
 func String(s string) iacTypes.StringValue {
-	return iacTypes.String(s, iacTypes.NewTestMetadata())
+	return iacTypes.StringTest(s)
 }
 func TestLines(t *testing.T) {
 	src := `

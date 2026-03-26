@@ -33,6 +33,8 @@ func adaptCluster(resource *terraform.Block) container.KubernetesCluster {
 		},
 		EnablePrivateCluster:        iacTypes.BoolDefault(false, resource.GetMetadata()),
 		APIServerAuthorizedIPRanges: nil,
+		DiskEncryptionSetID:         iacTypes.StringDefault("", resource.GetMetadata()),
+		AgentPools:                  []container.AgentPool{},
 		RoleBasedAccessControl: container.RoleBasedAccessControl{
 			Metadata: resource.GetMetadata(),
 			Enabled:  iacTypes.BoolDefault(false, resource.GetMetadata()),
@@ -40,6 +42,10 @@ func adaptCluster(resource *terraform.Block) container.KubernetesCluster {
 		AddonProfile: container.AddonProfile{
 			Metadata: resource.GetMetadata(),
 			OMSAgent: container.OMSAgent{
+				Metadata: resource.GetMetadata(),
+				Enabled:  iacTypes.BoolDefault(false, resource.GetMetadata()),
+			},
+			AzurePolicy: container.AzurePolicy{
 				Metadata: resource.GetMetadata(),
 				Enabled:  iacTypes.BoolDefault(false, resource.GetMetadata()),
 			},
@@ -64,43 +70,83 @@ func adaptCluster(resource *terraform.Block) container.KubernetesCluster {
 	addonProfileBlock := resource.GetBlock("addon_profile")
 	if addonProfileBlock.IsNotNil() {
 		cluster.AddonProfile.Metadata = addonProfileBlock.GetMetadata()
-		omsAgentBlock := addonProfileBlock.GetBlock("oms_agent")
-		if omsAgentBlock.IsNotNil() {
-			cluster.AddonProfile.OMSAgent.Metadata = omsAgentBlock.GetMetadata()
-			enabledAttr := omsAgentBlock.GetAttribute("enabled")
-			cluster.AddonProfile.OMSAgent.Enabled = enabledAttr.AsBoolValueOrDefault(false, omsAgentBlock)
+		if block := addonProfileBlock.GetBlock("oms_agent"); block.IsNotNil() {
+			cluster.AddonProfile.OMSAgent = container.OMSAgent{
+				Metadata: block.GetMetadata(),
+				Enabled:  block.GetAttribute("enabled").AsBoolValueOrDefault(false, block),
+			}
+		}
+
+		if block := addonProfileBlock.GetBlock("azure_policy"); block.IsNotNil() {
+			cluster.AddonProfile.AzurePolicy = container.AzurePolicy{
+				Metadata: block.GetMetadata(),
+				Enabled:  block.GetAttribute("enabled").AsBoolValueOrDefault(false, block),
+			}
 		}
 	}
 
 	// >= azurerm 2.97.0
-	if omsAgentBlock := resource.GetBlock("oms_agent"); omsAgentBlock.IsNotNil() {
-		cluster.AddonProfile.OMSAgent.Metadata = omsAgentBlock.GetMetadata()
-		cluster.AddonProfile.OMSAgent.Enabled = iacTypes.Bool(true, omsAgentBlock.GetMetadata())
+	if block := resource.GetBlock("oms_agent"); block.IsNotNil() {
+		cluster.AddonProfile.OMSAgent = container.OMSAgent{
+			Metadata: block.GetMetadata(),
+			Enabled:  iacTypes.Bool(true, block.GetMetadata()),
+		}
+	}
+
+	// azurerm >= 3.0.0 - new syntax for azure policy
+	if attr := resource.GetAttribute("azure_policy_enabled"); attr.IsNotNil() {
+		cluster.AddonProfile.AzurePolicy = container.AzurePolicy{
+			Metadata: attr.GetMetadata(),
+			Enabled:  attr.AsBoolValueOrDefault(false, resource),
+		}
 	}
 
 	// azurerm < 2.99.0
-	if resource.HasChild("role_based_access_control") {
-		roleBasedAccessControlBlock := resource.GetBlock("role_based_access_control")
-		rbEnabledAttr := roleBasedAccessControlBlock.GetAttribute("enabled")
-		cluster.RoleBasedAccessControl.Metadata = roleBasedAccessControlBlock.GetMetadata()
-		cluster.RoleBasedAccessControl.Enabled = rbEnabledAttr.AsBoolValueOrDefault(false, roleBasedAccessControlBlock)
-	}
-	if resource.HasChild("role_based_access_control_enabled") {
-		// azurerm >= 2.99.0
-		roleBasedAccessControlEnabledAttr := resource.GetAttribute("role_based_access_control_enabled")
-		cluster.RoleBasedAccessControl.Metadata = roleBasedAccessControlEnabledAttr.GetMetadata()
-		cluster.RoleBasedAccessControl.Enabled = roleBasedAccessControlEnabledAttr.AsBoolValueOrDefault(false, resource)
+	if rbacBlock := resource.GetBlock("role_based_access_control"); rbacBlock.IsNotNil() {
+		rbEnabledAttr := rbacBlock.GetAttribute("enabled")
+		cluster.RoleBasedAccessControl.Metadata = rbacBlock.GetMetadata()
+		cluster.RoleBasedAccessControl.Enabled = rbEnabledAttr.AsBoolValueOrDefault(false, rbacBlock)
 	}
 
-	if resource.HasChild("azure_active_directory_role_based_access_control") {
-		azureRoleBasedAccessControl := resource.GetBlock("azure_active_directory_role_based_access_control")
-		if azureRoleBasedAccessControl.IsNotNil() {
-			enabledAttr := azureRoleBasedAccessControl.GetAttribute("azure_rbac_enabled")
+	if rbacEnabledAttr := resource.GetAttribute("role_based_access_control_enabled"); rbacEnabledAttr.IsNotNil() {
+		// azurerm >= 2.99.0
+		cluster.RoleBasedAccessControl.Metadata = rbacEnabledAttr.GetMetadata()
+		cluster.RoleBasedAccessControl.Enabled = rbacEnabledAttr.AsBoolValueOrDefault(false, resource)
+	}
+
+	if block := resource.GetBlock("azure_active_directory_role_based_access_control"); block.IsNotNil() {
+		enabledAttr := block.GetAttribute("azure_rbac_enabled")
+		if enabledAttr.IsNotNil() {
 			if !cluster.RoleBasedAccessControl.Enabled.IsTrue() {
-				cluster.RoleBasedAccessControl.Metadata = azureRoleBasedAccessControl.GetMetadata()
-				cluster.RoleBasedAccessControl.Enabled = enabledAttr.AsBoolValueOrDefault(false, azureRoleBasedAccessControl)
+				cluster.RoleBasedAccessControl.Metadata = block.GetMetadata()
+				cluster.RoleBasedAccessControl.Enabled = enabledAttr.AsBoolValueOrDefault(false, block)
 			}
 		}
 	}
+
+	if diskEncryptionSetIDAttr := resource.GetAttribute("disk_encryption_set_id"); diskEncryptionSetIDAttr.IsNotNil() {
+		cluster.DiskEncryptionSetID = diskEncryptionSetIDAttr.AsStringValueOrDefault("", resource)
+	}
+
+	cluster.AgentPools = adaptAgentPools(resource)
+
 	return cluster
+}
+
+func adaptAgentPools(resource *terraform.Block) []container.AgentPool {
+	var pools []container.AgentPool
+
+	if defaultNodePoolBlock := resource.GetBlock("default_node_pool"); defaultNodePoolBlock.IsNotNil() {
+		pools = append(pools, adaptAgentPool(defaultNodePoolBlock))
+	}
+
+	return pools
+}
+
+func adaptAgentPool(block *terraform.Block) container.AgentPool {
+	return container.AgentPool{
+		Metadata:            block.GetMetadata(),
+		DiskEncryptionSetID: block.GetAttribute("disk_encryption_set_id").AsStringValueOrDefault("", block),
+		NodeType:            block.GetAttribute("type").AsStringValueOrDefault("VirtualMachineScaleSets", block),
+	}
 }

@@ -10,7 +10,6 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"github.com/aquasecurity/trivy/pkg/types"
 	"io"
 	"net/http"
 	"net/url"
@@ -27,6 +26,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/aquasecurity/trivy/internal/testutil"
+	"github.com/aquasecurity/trivy/pkg/types"
 )
 
 const (
@@ -116,10 +118,18 @@ type registryOption struct {
 	Username      string
 	Password      string
 	RegistryToken bool
+	AuthLogin     bool
 }
 
+// TestRegistry tests scanning images from a container registry.
+//
+// Golden files are shared with TestTar.
 func TestRegistry(t *testing.T) {
-	ctx := context.Background()
+	if *update {
+		t.Skipf("Skipping TestRegistry when -update flag is set. Golden files should be updated via TestTar.")
+	}
+
+	ctx := t.Context()
 
 	baseDir, err := filepath.Abs(".")
 	require.NoError(t, err)
@@ -130,7 +140,7 @@ func TestRegistry(t *testing.T) {
 	// set up auth server
 	authC, err := setupAuthServer(ctx, baseDir)
 	require.NoError(t, err)
-	defer authC.Terminate(ctx)
+	testcontainers.CleanupContainer(t, authC)
 
 	authURL, err := getURL(ctx, authC, authPort)
 	require.NoError(t, err)
@@ -138,7 +148,7 @@ func TestRegistry(t *testing.T) {
 	// set up registry
 	registryC, err := setupRegistry(ctx, baseDir, authURL)
 	require.NoError(t, err)
-	defer registryC.Terminate(ctx)
+	testcontainers.CleanupContainer(t, registryC)
 
 	registryURL, err := getURL(ctx, registryC, registryPort)
 	require.NoError(t, err)
@@ -152,32 +162,68 @@ func TestRegistry(t *testing.T) {
 		name      string
 		imageName string
 		imageFile string
+		os        string
 		option    registryOption
 		golden    string
 		wantErr   string
 	}{
 		{
-			name:      "happy path with username/password",
+			name:      "authenticate with username/password",
 			imageName: "alpine:3.10",
 			imageFile: "testdata/fixtures/images/alpine-310.tar.gz",
+			os:        "alpine 3.10.2",
 			option: registryOption{
-				AuthURL:  authURL,
 				Username: authUsername,
 				Password: authPassword,
 			},
-			golden: "testdata/alpine-310-registry.json.golden",
+			golden: goldenAlpine310JSON,
 		},
 		{
-			name:      "happy path with registry token",
+			name:      "authenticate with registry token",
 			imageName: "alpine:3.10",
 			imageFile: "testdata/fixtures/images/alpine-310.tar.gz",
+			os:        "alpine 3.10.2",
 			option: registryOption{
 				AuthURL:       authURL,
 				Username:      authUsername,
 				Password:      authPassword,
 				RegistryToken: true,
 			},
-			golden: "testdata/alpine-310-registry.json.golden",
+			golden: goldenAlpine310JSON,
+		},
+		{
+			name:      "authenticate with 'trivy registry login'",
+			imageName: "alpine:3.10",
+			imageFile: "testdata/fixtures/images/alpine-310.tar.gz",
+			os:        "alpine 3.10.2",
+			option: registryOption{
+				Username:  authUsername,
+				Password:  authPassword,
+				AuthLogin: true,
+			},
+			golden: goldenAlpine310JSON,
+		},
+		{
+			name:      "amazonlinux 2",
+			imageName: "amazonlinux:2",
+			imageFile: "testdata/fixtures/images/amazon-2.tar.gz",
+			os:        "amazon 2 (Karoo)",
+			option: registryOption{
+				Username: authUsername,
+				Password: authPassword,
+			},
+			golden: goldenAmazon2,
+		},
+		{
+			name:      "debian buster",
+			imageName: "debian:buster",
+			imageFile: "testdata/fixtures/images/debian-buster.tar.gz",
+			os:        "debian 10.1",
+			option: registryOption{
+				Username: authUsername,
+				Password: authPassword,
+			},
+			golden: goldenDebianBuster,
 		},
 		{
 			name:      "sad path",
@@ -187,25 +233,35 @@ func TestRegistry(t *testing.T) {
 		},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			s := fmt.Sprintf("%s/%s", registryURL.Host, tc.imageName)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := fmt.Sprintf("%s/%s", registryURL.Host, tt.imageName)
 			imageRef, err := name.ParseReference(s)
 			require.NoError(t, err)
 
 			// Load a test image from the tar file, tag it and push to the test registry.
-			err = replicateImage(imageRef, tc.imageFile, auth)
+			err = replicateImage(imageRef, tt.imageFile, auth)
 			require.NoError(t, err)
 
-			osArgs, err := scan(t, imageRef, baseDir, tc.golden, tc.option)
+			osArgs, err := scan(t, imageRef, baseDir, tt.option)
+			require.NoError(t, err)
 
 			// Run Trivy
-			runTest(t, osArgs, tc.golden, "", types.FormatJSON, runOptions{
-				wantErr: tc.wantErr,
-				override: overrideFuncs(overrideUID, func(t *testing.T, _, got *types.Report) {
-					got.ArtifactName = tc.imageName
-					for i := range got.Results {
-						got.Results[i].Target = fmt.Sprintf("%s (alpine 3.10.2)", tc.imageName)
+			runTest(t, osArgs, tt.golden, types.FormatJSON, runOptions{
+				wantErr:  tt.wantErr,
+				fakeUUID: "3ff14136-e09f-4df9-80ea-%012d",
+				override: overrideFuncs(overrideUID, overrideFingerprint, func(t *testing.T, want, got *types.Report) {
+					// Exclude ArtifactID from comparison because registry tests use random ports
+					// (e.g., localhost:54321/alpine:3.10), which causes RepoTags and the calculated
+					// Artifact ID to vary on each test run.
+					got.ArtifactID = ""
+					want.ArtifactID = ""
+
+					want.ArtifactName = s
+					want.Metadata.RepoTags = []string{s}
+					want.Metadata.Reference = testutil.MustParseReference(t, s)
+					for i := range want.Results {
+						want.Results[i].Target = fmt.Sprintf("%s (%s)", s, tt.os)
 					}
 				}),
 			})
@@ -213,7 +269,7 @@ func TestRegistry(t *testing.T) {
 	}
 }
 
-func scan(t *testing.T, imageRef name.Reference, baseDir, goldenFile string, opt registryOption) ([]string, error) {
+func scan(t *testing.T, imageRef name.Reference, baseDir string, opt registryOption) ([]string, error) {
 	// Set up testing DB
 	cacheDir := initDB(t)
 
@@ -232,7 +288,10 @@ func scan(t *testing.T, imageRef name.Reference, baseDir, goldenFile string, opt
 		"image",
 		"--format",
 		"json",
-		"--skip-update",
+		"--list-all-pkgs=false",
+		"--image-src",
+		"remote",
+		"--skip-db-update",
 		imageRef.Name(),
 	}
 
@@ -243,14 +302,30 @@ func setupEnv(t *testing.T, imageRef name.Reference, baseDir string, opt registr
 	t.Setenv("TRIVY_INSECURE", "true")
 
 	if opt.Username != "" && opt.Password != "" {
-		if opt.RegistryToken {
+		switch {
+		case opt.RegistryToken:
 			// Get a registry token in advance
 			token, err := requestRegistryToken(imageRef, baseDir, opt)
 			if err != nil {
 				return err
 			}
 			t.Setenv("TRIVY_REGISTRY_TOKEN", token)
-		} else {
+		case opt.AuthLogin:
+			t.Setenv("DOCKER_CONFIG", t.TempDir())
+			err := execute([]string{
+				"registry",
+				"login",
+				"--username",
+				opt.Username,
+				"--password",
+				opt.Password,
+				"--insecure",
+				imageRef.Context().RegistryStr(),
+			})
+			if err != nil {
+				return err
+			}
+		default:
 			t.Setenv("TRIVY_USERNAME", opt.Username)
 			t.Setenv("TRIVY_PASSWORD", opt.Password)
 		}
@@ -277,7 +352,7 @@ func requestRegistryToken(imageRef name.Reference, baseDir string, opt registryO
 	}
 
 	// Get a registry token
-	req, err := http.NewRequest("GET", fmt.Sprintf("%s/auth", opt.AuthURL), nil)
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/auth", opt.AuthURL), http.NoBody)
 	if err != nil {
 		return "", err
 	}

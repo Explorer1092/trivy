@@ -21,6 +21,20 @@ func Adapt(modules terraform.Modules) storage.Storage {
 			EnableLogging: iacTypes.BoolDefault(false, iacTypes.NewUnmanagedMetadata()),
 		},
 		MinimumTLSVersion: iacTypes.StringDefault("", iacTypes.NewUnmanagedMetadata()),
+		BlobProperties: storage.BlobProperties{
+			Metadata: iacTypes.NewUnmanagedMetadata(),
+			DeleteRetentionPolicy: storage.DeleteRetentionPolicy{
+				Metadata: iacTypes.NewUnmanagedMetadata(),
+				Days:     iacTypes.IntDefault(7, iacTypes.NewUnmanagedMetadata()),
+			},
+		},
+		AccountReplicationType:          iacTypes.StringDefault("", iacTypes.NewUnmanagedMetadata()),
+		InfrastructureEncryptionEnabled: iacTypes.BoolDefault(false, iacTypes.NewUnmanagedMetadata()),
+		CustomerManagedKey: storage.CustomerManagedKey{
+			Metadata:               iacTypes.NewUnmanagedMetadata(),
+			KeyVaultKeyId:          iacTypes.StringDefault("", iacTypes.NewUnmanagedMetadata()),
+			UserAssignedIdentityId: iacTypes.StringDefault("", iacTypes.NewUnmanagedMetadata()),
+		},
 	}
 
 	accounts = append(accounts, orphanAccount)
@@ -74,22 +88,71 @@ func adaptAccounts(modules terraform.Modules) ([]storage.Account, []string, []st
 	for _, module := range modules {
 		for _, resource := range module.GetResourcesByType("azurerm_storage_account") {
 			account := adaptAccount(resource)
-			containerResource := module.GetReferencingResources(resource, "azurerm_storage_container", "storage_account_name")
+			containerResource := module.GetReferencingResources(resource, "azurerm_storage_container", "storage_account_id")
+
+			if len(containerResource) == 0 {
+				// If no referencing container resources are found, check for any containers that reference the account by Name instead of ID (older versions of the provider did this)
+				containerResource = module.GetReferencingResources(resource, "azurerm_storage_container", "storage_account_name")
+			}
 			for _, containerBlock := range containerResource {
 				accountedForContainers = append(accountedForContainers, containerBlock.ID())
 				account.Containers = append(account.Containers, adaptContainer(containerBlock))
 			}
-			networkRulesResource := module.GetReferencingResources(resource, "azurerm_storage_account_network_rules", "storage_account_name")
+			networkRulesResource := module.GetReferencingResources(resource, "azurerm_storage_account_network_rules", "storage_account_id")
+
+			if len(networkRulesResource) == 0 {
+				// If no referencing network rules resources are found, check for any that reference the account by Name instead of ID (older versions of the provider did this)
+				networkRulesResource = module.GetReferencingResources(resource, "azurerm_storage_account_network_rules", "storage_account_name")
+			}
 			for _, networkRuleBlock := range networkRulesResource {
 				accountedForNetworkRules = append(accountedForNetworkRules, networkRuleBlock.ID())
 				account.NetworkRules = append(account.NetworkRules, adaptNetworkRule(networkRuleBlock))
 			}
-			for _, queueBlock := range module.GetReferencingResources(resource, "azurerm_storage_queue", "storage_account_name") {
+
+			queueResource := module.GetReferencingResources(resource, "azurerm_storage_queue", "storage_account_id")
+
+			if len(queueResource) == 0 {
+				// If no referencing queue resources are found, check for any that reference the account by Name instead of ID (older versions of the provider did this)
+				queueResource = module.GetReferencingResources(resource, "azurerm_storage_queue", "storage_account_name")
+			}
+
+			for _, queueBlock := range queueResource {
 				queue := storage.Queue{
 					Metadata: queueBlock.GetMetadata(),
 					Name:     queueBlock.GetAttribute("name").AsStringValueOrDefault("", queueBlock),
 				}
 				account.Queues = append(account.Queues, queue)
+			}
+			// Adapt customer managed key resource
+			// Only use the resource if the block wasn't already set (they are mutually exclusive in Terraform)
+			if account.CustomerManagedKey.KeyVaultKeyId.IsEmpty() {
+				customerManagedKeyResources := module.GetReferencingResources(resource, "azurerm_storage_account_customer_managed_key", "storage_account_id")
+				for _, cmkResource := range customerManagedKeyResources {
+					keyVaultKeyIdAttr := cmkResource.GetAttribute("key_vault_key_id")
+					if keyVaultKeyIdAttr.IsNotNil() {
+						account.CustomerManagedKey.KeyVaultKeyId = keyVaultKeyIdAttr.AsStringValueOrDefault("", cmkResource)
+						account.CustomerManagedKey.Metadata = cmkResource.GetMetadata()
+					} else {
+						// If key_vault_key_id is not directly set, try to construct from key_vault_id and key_name
+						keyVaultIdAttr := cmkResource.GetAttribute("key_vault_id")
+						keyNameAttr := cmkResource.GetAttribute("key_name")
+						if keyVaultIdAttr.IsNotNil() && keyNameAttr.IsNotNil() {
+							keyVaultId := keyVaultIdAttr.AsStringValueOrDefault("", cmkResource)
+							keyName := keyNameAttr.AsStringValueOrDefault("", cmkResource)
+							if !keyVaultId.IsEmpty() && !keyName.IsEmpty() {
+								// Construct the full key ID format: https://{keyVaultId}/keys/{keyName}
+								keyId := keyVaultId.Value() + "/keys/" + keyName.Value()
+								account.CustomerManagedKey.KeyVaultKeyId = iacTypes.String(keyId, cmkResource.GetMetadata())
+								account.CustomerManagedKey.Metadata = cmkResource.GetMetadata()
+							}
+						}
+					}
+					userAssignedIdentityIdAttr := cmkResource.GetAttribute("user_assigned_identity_id")
+					if userAssignedIdentityIdAttr.IsNotNil() {
+						account.CustomerManagedKey.UserAssignedIdentityId = userAssignedIdentityIdAttr.AsStringValueOrDefault("", cmkResource)
+					}
+					break // Only process the first matching resource
+				}
 			}
 			accounts = append(accounts, account)
 		}
@@ -108,7 +171,22 @@ func adaptAccount(resource *terraform.Block) storage.Account {
 			Metadata:      resource.GetMetadata(),
 			EnableLogging: iacTypes.BoolDefault(false, resource.GetMetadata()),
 		},
-		MinimumTLSVersion: iacTypes.StringDefault(minimumTlsVersionOneTwo, resource.GetMetadata()),
+		MinimumTLSVersion:   iacTypes.StringDefault(minimumTlsVersionOneTwo, resource.GetMetadata()),
+		PublicNetworkAccess: resource.GetAttribute("public_network_access_enabled").AsBoolValueOrDefault(true, resource),
+		BlobProperties: storage.BlobProperties{
+			Metadata: resource.GetMetadata(),
+			DeleteRetentionPolicy: storage.DeleteRetentionPolicy{
+				Metadata: resource.GetMetadata(),
+				Days:     iacTypes.IntDefault(7, resource.GetMetadata()),
+			},
+		},
+		AccountReplicationType:          resource.GetAttribute("account_replication_type").AsStringValueOrDefault("", resource),
+		InfrastructureEncryptionEnabled: resource.GetAttribute("infrastructure_encryption_enabled").AsBoolValueOrDefault(false, resource),
+		CustomerManagedKey: storage.CustomerManagedKey{
+			Metadata:               resource.GetMetadata(),
+			KeyVaultKeyId:          iacTypes.StringDefault("", resource.GetMetadata()),
+			UserAssignedIdentityId: iacTypes.StringDefault("", resource.GetMetadata()),
+		},
 	}
 
 	networkRulesBlocks := resource.GetBlocks("network_rules")
@@ -116,15 +194,54 @@ func adaptAccount(resource *terraform.Block) storage.Account {
 		account.NetworkRules = append(account.NetworkRules, adaptNetworkRule(networkBlock))
 	}
 
-	httpsOnlyAttr := resource.GetAttribute("enable_https_traffic_only")
-	account.EnforceHTTPS = httpsOnlyAttr.AsBoolValueOrDefault(true, resource)
+	account.EnforceHTTPS = resource.GetFirstAttributeOf(
+		"enable_https_traffic_only",
+		"https_traffic_only_enabled", // provider above version 4
+	).AsBoolValueOrDefault(true, resource)
 
+	// Adapt blob properties
+	blobPropertiesBlock := resource.GetBlock("blob_properties")
+	if blobPropertiesBlock.IsNotNil() {
+		account.BlobProperties.Metadata = blobPropertiesBlock.GetMetadata()
+		deleteRetentionPolicyBlock := blobPropertiesBlock.GetBlock("delete_retention_policy")
+		if deleteRetentionPolicyBlock.IsNotNil() {
+			account.BlobProperties.DeleteRetentionPolicy.Metadata = deleteRetentionPolicyBlock.GetMetadata()
+			daysAttr := deleteRetentionPolicyBlock.GetAttribute("days")
+			if daysAttr.IsNotNil() {
+				account.BlobProperties.DeleteRetentionPolicy.Days = daysAttr.AsIntValueOrDefault(7, deleteRetentionPolicyBlock)
+			}
+		}
+	}
+
+	// Adapt customer managed key
+	customerManagedKeyBlock := resource.GetBlock("customer_managed_key")
+	if customerManagedKeyBlock.IsNotNil() {
+		account.CustomerManagedKey.Metadata = customerManagedKeyBlock.GetMetadata()
+		keyVaultKeyIdAttr := customerManagedKeyBlock.GetAttribute("key_vault_key_id")
+		if keyVaultKeyIdAttr.IsNotNil() {
+			account.CustomerManagedKey.KeyVaultKeyId = keyVaultKeyIdAttr.AsStringValueOrDefault("", customerManagedKeyBlock)
+		}
+		userAssignedIdentityIdAttr := customerManagedKeyBlock.GetAttribute("user_assigned_identity_id")
+		if userAssignedIdentityIdAttr.IsNotNil() {
+			account.CustomerManagedKey.UserAssignedIdentityId = userAssignedIdentityIdAttr.AsStringValueOrDefault("", customerManagedKeyBlock)
+		}
+	}
+
+	// Adapt queue properties
 	queuePropertiesBlock := resource.GetBlock("queue_properties")
 	if queuePropertiesBlock.IsNotNil() {
 		account.QueueProperties.Metadata = queuePropertiesBlock.GetMetadata()
 		loggingBlock := queuePropertiesBlock.GetBlock("logging")
 		if loggingBlock.IsNotNil() {
 			account.QueueProperties.EnableLogging = iacTypes.Bool(true, loggingBlock.GetMetadata())
+			account.QueueProperties.Logging = storage.QueueLogging{
+				Metadata:            loggingBlock.GetMetadata(),
+				Delete:              loggingBlock.GetAttribute("delete").AsBoolValueOrDefault(false, loggingBlock),
+				Read:                loggingBlock.GetAttribute("read").AsBoolValueOrDefault(false, loggingBlock),
+				Write:               loggingBlock.GetAttribute("write").AsBoolValueOrDefault(false, loggingBlock),
+				Version:             loggingBlock.GetAttribute("version").AsStringValueOrDefault("", loggingBlock),
+				RetentionPolicyDays: loggingBlock.GetAttribute("retention_policy_days").AsIntValueOrDefault(0, loggingBlock),
+			}
 		}
 	}
 
@@ -161,8 +278,7 @@ func adaptNetworkRule(resource *terraform.Block) storage.NetworkRule {
 		allowByDefault = iacTypes.BoolDefault(false, resource.GetMetadata())
 	}
 
-	if resource.HasChild("bypass") {
-		bypassAttr := resource.GetAttribute("bypass")
+	if bypassAttr := resource.GetAttribute("bypass"); bypassAttr.IsNotNil() {
 		bypass = bypassAttr.AsStringValues()
 	}
 

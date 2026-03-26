@@ -84,6 +84,7 @@ func (m *Metadata) ToRego() any {
 		"sourceprefix": m.Range().GetSourcePrefix(),
 		"managed":      m.isManaged,
 		"explicit":     m.isExplicit,
+		"unresolvable": m.isUnresolvable,
 		"fskey":        CreateFSKey(m.Range().GetFS()),
 		"resource":     m.Reference(),
 	}
@@ -195,14 +196,6 @@ func (m Metadata) IsManaged() bool {
 
 func (m Metadata) IsUnmanaged() bool {
 	return !m.isManaged
-}
-
-type BaseAttribute struct {
-	metadata Metadata
-}
-
-func (b BaseAttribute) GetMetadata() Metadata {
-	return b.metadata
 }
 
 func (m Metadata) GetMetadata() Metadata {

@@ -2,85 +2,59 @@ package parser
 
 import (
 	"context"
-	"fmt"
 	"io"
-	"io/fs"
-	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/moby/buildkit/frontend/dockerfile/instructions"
 	"github.com/moby/buildkit/frontend/dockerfile/parser"
+	"golang.org/x/xerrors"
 
 	"github.com/aquasecurity/trivy/pkg/iac/providers/dockerfile"
-	"github.com/aquasecurity/trivy/pkg/log"
 )
 
 type Parser struct {
-	logger *log.Logger
+	strict bool
 }
 
-// New creates a new Dockerfile parser
-func New() *Parser {
-	return &Parser{
-		logger: log.WithPrefix("dockerfile parser"),
+type Option func(p *Parser)
+
+// WithStrict returns a Parser option that enables strict parsing mode.
+// By default, the Parser runs in non-strict mode, where unknown flags are ignored.
+// Calling this option ensures that unknown flags cause an error.
+func WithStrict() Option {
+	return func(p *Parser) {
+		p.strict = true
 	}
 }
 
-func (p *Parser) ParseFS(ctx context.Context, target fs.FS, path string) (map[string]*dockerfile.Dockerfile, error) {
-
-	files := make(map[string]*dockerfile.Dockerfile)
-	if err := fs.WalkDir(target, filepath.ToSlash(path), func(path string, entry fs.DirEntry, err error) error {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			return nil
-		}
-
-		df, err := p.ParseFile(ctx, target, path)
-		if err != nil {
-			p.logger.Error("Failed to parse Dockerfile", log.FilePath(path), log.Err(err))
-			return nil
-		}
-		files[path] = df
-		return nil
-	}); err != nil {
-		return nil, err
+func NewParser(opts ...Option) *Parser {
+	p := &Parser{}
+	for _, opt := range opts {
+		opt(p)
 	}
-	return files, nil
+	return p
 }
 
-// ParseFile parses Dockerfile content from the provided filesystem path.
-func (p *Parser) ParseFile(_ context.Context, fsys fs.FS, path string) (*dockerfile.Dockerfile, error) {
-	f, err := fsys.Open(filepath.ToSlash(path))
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-	return p.parse(path, f)
-}
-
-func (p *Parser) parse(path string, r io.Reader) (*dockerfile.Dockerfile, error) {
+func (p *Parser) Parse(_ context.Context, r io.Reader, path string) ([]*dockerfile.Dockerfile, error) {
 	parsed, err := parser.Parse(r)
 	if err != nil {
-		return nil, fmt.Errorf("dockerfile parse error: %w", err)
+		return nil, xerrors.Errorf("dockerfile parse error: %w", err)
 	}
 
-	var parsedFile dockerfile.Dockerfile
-	var stage dockerfile.Stage
-	var stageIndex int
+	var (
+		parsedFile dockerfile.Dockerfile
+		stage      dockerfile.Stage
+		stageIndex int
+	)
+
 	fromValue := "args"
 	for _, child := range parsed.AST.Children {
 		child.Value = strings.ToLower(child.Value)
 
-		instr, err := instructions.ParseInstruction(child)
+		instr, err := p.parseInstruction(child)
 		if err != nil {
-			return nil, fmt.Errorf("process dockerfile instructions: %w", err)
+			return nil, xerrors.Errorf("parse dockerfile instruction: %w", err)
 		}
 
 		if _, ok := instr.(*instructions.Stage); ok {
@@ -106,14 +80,27 @@ func (p *Parser) parse(path string, r io.Reader) (*dockerfile.Dockerfile, error)
 			EndLine:   child.EndLine,
 		}
 
+		// processing statement with sub-statement
+		// example: ONBUILD RUN foo bar
+		// https://github.com/moby/buildkit/blob/master/frontend/dockerfile/docs/reference.md#onbuild
 		if child.Next != nil && len(child.Next.Children) > 0 {
 			cmd.SubCmd = child.Next.Children[0].Value
 			child = child.Next.Children[0]
 		}
 
+		// mark if the instruction is in exec form
+		// https://github.com/moby/buildkit/blob/master/frontend/dockerfile/docs/reference.md#exec-form
 		cmd.JSON = child.Attributes["json"]
-		for n := child.Next; n != nil; n = n.Next {
-			cmd.Value = append(cmd.Value, n.Value)
+
+		// heredoc may contain a script that will be executed in the shell, so we need to process it
+		// https://github.com/moby/buildkit/blob/master/frontend/dockerfile/docs/reference.md#here-documents
+		if len(child.Heredocs) > 0 && child.Next != nil {
+			cmd.Original = originalFromHeredoc(child)
+			cmd.Value = []string{processHeredoc(child)}
+		} else {
+			for n := child.Next; n != nil; n = n.Next {
+				cmd.Value = append(cmd.Value, n.Value)
+			}
 		}
 
 		stage.Commands = append(stage.Commands, cmd)
@@ -123,5 +110,81 @@ func (p *Parser) parse(path string, r io.Reader) (*dockerfile.Dockerfile, error)
 		parsedFile.Stages = append(parsedFile.Stages, stage)
 	}
 
-	return &parsedFile, nil
+	return []*dockerfile.Dockerfile{&parsedFile}, nil
+}
+
+func (p *Parser) parseInstruction(child *parser.Node) (any, error) {
+	for {
+		instr, err := instructions.ParseInstruction(child)
+		if err == nil {
+			return instr, nil
+		} else if p.strict {
+			return nil, xerrors.Errorf("parse instruction %q: %w", child.Value, err)
+		}
+
+		flagName := extractUnknownFlag(err.Error())
+		if flagName == "" {
+			return nil, xerrors.Errorf("parse instruction %q: %w", child.Value, err)
+		}
+
+		filtered := slices.DeleteFunc(child.Flags, func(flag string) bool {
+			return strings.HasPrefix(flag, flagName)
+		})
+
+		if len(filtered) == len(child.Flags) {
+			return nil, xerrors.Errorf("cannot remove unknown flag %q from flags %v", flagName, child.Flags)
+		}
+		child.Flags = filtered
+	}
+}
+
+func extractUnknownFlag(errMsg string) string {
+	after, ok := strings.CutPrefix(errMsg, "unknown flag: ")
+	if !ok {
+		return ""
+	}
+
+	flagName, _, _ := strings.Cut(after, " ")
+	return flagName
+}
+
+func originalFromHeredoc(node *parser.Node) string {
+	var sb strings.Builder
+	sb.WriteString(node.Original)
+	sb.WriteRune('\n')
+	for i, heredoc := range node.Heredocs {
+		sb.WriteString(heredoc.Content)
+		sb.WriteString(heredoc.Name)
+		if i != len(node.Heredocs)-1 {
+			sb.WriteRune('\n')
+		}
+	}
+
+	return sb.String()
+}
+
+// heredoc processing taken from here
+// https://github.com/moby/buildkit/blob/9a39e2c112b7c98353c27e64602bc08f31fe356e/frontend/dockerfile/dockerfile2llb/convert.go#L1200
+func processHeredoc(node *parser.Node) string {
+	if parser.MustParseHeredoc(node.Next.Value) == nil || strings.HasPrefix(node.Heredocs[0].Content, "#!") {
+		// more complex heredoc is passed to the shell as is
+		var sb strings.Builder
+		sb.WriteString(node.Next.Value)
+		for _, heredoc := range node.Heredocs {
+			sb.WriteRune('\n')
+			sb.WriteString(heredoc.Content)
+			sb.WriteString(heredoc.Name)
+		}
+		return sb.String()
+	}
+
+	// simple heredoc and the content is run in a shell
+	content := node.Heredocs[0].Content
+	if node.Heredocs[0].Chomp {
+		content = parser.ChompHeredocContent(content)
+	}
+
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	cmds := strings.Split(strings.TrimSuffix(content, "\n"), "\n")
+	return strings.Join(cmds, " ; ")
 }

@@ -16,8 +16,10 @@ import (
 	"github.com/samber/lo"
 	"golang.org/x/xerrors"
 
+	"github.com/aquasecurity/trivy/pkg/dependency"
 	"github.com/aquasecurity/trivy/pkg/fanal/analyzer"
 	"github.com/aquasecurity/trivy/pkg/fanal/types"
+	"github.com/aquasecurity/trivy/pkg/set"
 )
 
 const (
@@ -124,8 +126,8 @@ func (a alpineCmdAnalyzer) fetchApkIndexArchive(targetOS types.OS) (*apkIndex, e
 func (a alpineCmdAnalyzer) parseConfig(apkIndexArchive *apkIndex, config *v1.ConfigFile) (packages []types.Package) {
 	envs := make(map[string]string)
 	for _, env := range config.Config.Env {
-		index := strings.Index(env, "=")
-		envs["$"+env[:index]] = env[index+1:]
+		before, after, _ := strings.Cut(env, "=")
+		envs["$"+before] = after
 	}
 
 	uniqPkgs := make(map[string]types.Package)
@@ -134,6 +136,7 @@ func (a alpineCmdAnalyzer) parseConfig(apkIndexArchive *apkIndex, config *v1.Con
 		pkgs = a.resolveDependencies(apkIndexArchive, pkgs)
 		results := a.guessVersion(apkIndexArchive, pkgs, history.Created.Time)
 		for _, result := range results {
+			result.Identifier.UID = dependency.UID("", result)
 			uniqPkgs[result.Name] = result
 		}
 	}
@@ -148,8 +151,8 @@ func (a alpineCmdAnalyzer) parseCommand(command string, envs map[string]string) 
 
 	command = strings.TrimPrefix(command, "/bin/sh -c")
 	var commands []string
-	for _, cmd := range strings.Split(command, "&&") {
-		for _, c := range strings.Split(cmd, ";") {
+	for cmd := range strings.SplitSeq(command, "&&") {
+		for c := range strings.SplitSeq(cmd, ";") {
 			commands = append(commands, strings.TrimSpace(c))
 		}
 	}
@@ -159,7 +162,7 @@ func (a alpineCmdAnalyzer) parseCommand(command string, envs map[string]string) 
 		}
 
 		var add bool
-		for _, field := range strings.Fields(cmd) {
+		for field := range strings.FieldsSeq(cmd) {
 			switch {
 			case strings.HasPrefix(field, "-") || strings.HasPrefix(field, "."):
 				continue
@@ -177,33 +180,30 @@ func (a alpineCmdAnalyzer) parseCommand(command string, envs map[string]string) 
 	return pkgs
 }
 func (a alpineCmdAnalyzer) resolveDependencies(apkIndexArchive *apkIndex, originalPkgs []string) (pkgs []string) {
-	uniqPkgs := make(map[string]struct{})
+	uniqPkgs := set.New[string]()
 	for _, pkgName := range originalPkgs {
-		if _, ok := uniqPkgs[pkgName]; ok {
+		if uniqPkgs.Contains(pkgName) {
 			continue
 		}
 
-		seenPkgs := make(map[string]struct{})
+		seenPkgs := set.New[string]()
 		for _, p := range a.resolveDependency(apkIndexArchive, pkgName, seenPkgs) {
-			uniqPkgs[p] = struct{}{}
+			uniqPkgs.Append(p)
 		}
 	}
-	for pkg := range uniqPkgs {
-		pkgs = append(pkgs, pkg)
-	}
-	return pkgs
+	return uniqPkgs.Items()
 }
 
 func (a alpineCmdAnalyzer) resolveDependency(apkIndexArchive *apkIndex, pkgName string,
-	seenPkgs map[string]struct{}) (pkgNames []string) {
+	seenPkgs set.Set[string]) (pkgNames []string) {
 	pkg, ok := apkIndexArchive.Package[pkgName]
 	if !ok {
 		return nil
 	}
-	if _, ok = seenPkgs[pkgName]; ok {
+	if seenPkgs.Contains(pkgName) {
 		return nil
 	}
-	seenPkgs[pkgName] = struct{}{}
+	seenPkgs.Append(pkgName)
 
 	pkgNames = append(pkgNames, pkgName)
 	for _, dependency := range pkg.Dependencies {

@@ -1,7 +1,6 @@
 package cloudformation
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -12,12 +11,11 @@ import (
 	"github.com/aquasecurity/trivy/pkg/iac/framework"
 	"github.com/aquasecurity/trivy/pkg/iac/rego"
 	"github.com/aquasecurity/trivy/pkg/iac/scan"
-	"github.com/aquasecurity/trivy/pkg/iac/scanners/options"
 )
 
 func Test_BasicScan(t *testing.T) {
 
-	fs := testutil.CreateFS(t, map[string]string{
+	fs := testutil.CreateFS(map[string]string{
 		"/code/main.yaml": `---
 Resources:
   S3Bucket:
@@ -30,7 +28,6 @@ Resources:
 
 __rego_metadata__ := {
 	"id": "DS006",
-	"avd_id": "AVD-DS-0006",
 	"title": "COPY '--from' referring to the current image",
 	"short_code": "no-self-referencing-copy-from",
 	"version": "v1.0.0",
@@ -58,16 +55,15 @@ deny[res] {
 `,
 	})
 
-	scanner := New(rego.WithPolicyDirs("rules"), options.ScannerWithRegoOnly(true))
+	scanner := New(rego.WithPolicyDirs("rules"))
 
-	results, err := scanner.ScanFS(context.TODO(), fs, "code")
+	results, err := scanner.ScanFS(t.Context(), fs, "code")
 	require.NoError(t, err)
 
 	require.Len(t, results.GetFailed(), 1)
 
 	assert.Equal(t, scan.Rule{
-		AVDID:          "AVD-DS-0006",
-		Aliases:        []string{"DS006"},
+		ID:             "DS006",
 		ShortCode:      "no-self-referencing-copy-from",
 		Summary:        "COPY '--from' referring to the current image",
 		Explanation:    "COPY '--from' should not mention the current FROM alias, since it is impossible to copy from itself.",
@@ -79,10 +75,7 @@ deny[res] {
 		Severity:       "CRITICAL",
 		Terraform:      &scan.EngineMetadata{},
 		CloudFormation: &scan.EngineMetadata{},
-		CustomChecks: scan.CustomChecks{
-			Terraform: (*scan.TerraformCustomCheck)(nil),
-		},
-		RegoPackage: "data.builtin.dockerfile.DS006",
+		RegoPackage:    "data.builtin.dockerfile.DS006",
 		Frameworks: map[framework.Framework][]string{
 			framework.Default: {},
 		},
@@ -112,8 +105,7 @@ const bucketNameCheck = `# METADATA
 # schemas:
 # - input: schema["cloud"]
 # custom:
-#   id: AVD-AWS-001
-#   avd_id: AVD-AWS-001
+#   id: AWS-001
 #   provider: aws
 #   service: s3
 #   severity: LOW
@@ -160,7 +152,7 @@ Resources:
 			name: "rule before resource",
 			src: `---
 Resources:
-#trivy:ignore:AVD-AWS-001
+#trivy:ignore:AWS-001
   S3Bucket:
     Type: 'AWS::S3::Bucket'
     Properties:
@@ -175,7 +167,7 @@ Resources:
   S3Bucket:
     Type: 'AWS::S3::Bucket'
     Properties:
-#trivy:ignore:AVD-AWS-001
+#trivy:ignore:AWS-001
       BucketName: test-bucket
 `,
 			ignored: 1,
@@ -187,7 +179,7 @@ Resources:
   S3Bucket:
     Type: 'AWS::S3::Bucket'
     Properties:
-      BucketName: test-bucket  #trivy:ignore:AVD-AWS-001
+      BucketName: test-bucket  #trivy:ignore:AWS-001
 `,
 			ignored: 1,
 		},
@@ -202,7 +194,7 @@ Resources:
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256 #trivy:ignore:AVD-AWS-001
+              SSEAlgorithm: AES256 #trivy:ignore:AWS-001
 `,
 			ignored: 1,
 		},
@@ -210,18 +202,17 @@ Resources:
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fsys := testutil.CreateFS(t, map[string]string{
+			fsys := testutil.CreateFS(map[string]string{
 				"/code/main.yaml": tt.src,
 			})
 
 			scanner := New(
-				options.ScannerWithRegoOnly(true),
 				rego.WithEmbeddedPolicies(false),
 				rego.WithPolicyReader(strings.NewReader(bucketNameCheck)),
 				rego.WithPolicyNamespaces("user"),
 			)
 
-			results, err := scanner.ScanFS(context.TODO(), fsys, "code")
+			results, err := scanner.ScanFS(t.Context(), fsys, "code")
 			require.NoError(t, err)
 
 			if tt.ignored == 0 {

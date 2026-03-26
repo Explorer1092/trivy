@@ -1,29 +1,13 @@
 {
   "SchemaVersion": 2,
+  "Trivy": {
+    "Version": "dev"
+  },
+  "ReportID": "017b7d41-e09f-7000-80ea-000000000001",
   "CreatedAt": "2021-08-25T12:20:30.000000005Z",
   "ArtifactName": "testdata/fixtures/sbom/license-cyclonedx.json",
   "ArtifactType": "cyclonedx",
-  "Metadata": {
-    "ImageConfig": {
-      "architecture": "",
-      "created": "0001-01-01T00:00:00Z",
-      "os": "",
-      "rootfs": {
-        "type": "",
-        "diff_ids": null
-      },
-      "config": {}
-    }
-  },
   "Results": [
-    {
-      "Target": "OS Packages",
-      "Class": "license"
-    },
-    {
-      "Target": "pom.xml",
-      "Class": "license"
-    },
     {
       "Target": "Java",
       "Class": "license",
@@ -34,6 +18,7 @@
           "PkgName": "org.eclipse.sisu:org.eclipse.sisu.plexus",
           "FilePath": "",
           "Name": "EPL-1.0",
+          "Text": "",
           "Confidence": 1,
           "Link": ""
         },
@@ -43,6 +28,7 @@
           "PkgName": "org.ow2.asm:asm",
           "FilePath": "",
           "Name": "BSD-3-Clause",
+          "Text": "",
           "Confidence": 1,
           "Link": ""
         },
@@ -52,14 +38,11 @@
           "PkgName": "org.slf4j:slf4j-api",
           "FilePath": "",
           "Name": "MIT License",
+          "Text": "",
           "Confidence": 1,
           "Link": ""
         }
       ]
-    },
-    {
-      "Target": "Loose File License(s)",
-      "Class": "license-file"
     }
   ]
 }

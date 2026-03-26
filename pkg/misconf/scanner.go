@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -20,20 +21,22 @@ import (
 	"github.com/aquasecurity/trivy/pkg/iac/rego"
 	"github.com/aquasecurity/trivy/pkg/iac/scan"
 	"github.com/aquasecurity/trivy/pkg/iac/scanners"
+	"github.com/aquasecurity/trivy/pkg/iac/scanners/ansible"
 	"github.com/aquasecurity/trivy/pkg/iac/scanners/azure/arm"
 	cfscanner "github.com/aquasecurity/trivy/pkg/iac/scanners/cloudformation"
 	cfparser "github.com/aquasecurity/trivy/pkg/iac/scanners/cloudformation/parser"
 	dfscanner "github.com/aquasecurity/trivy/pkg/iac/scanners/dockerfile"
+	"github.com/aquasecurity/trivy/pkg/iac/scanners/generic"
 	"github.com/aquasecurity/trivy/pkg/iac/scanners/helm"
-	jsonscanner "github.com/aquasecurity/trivy/pkg/iac/scanners/json"
 	k8sscanner "github.com/aquasecurity/trivy/pkg/iac/scanners/kubernetes"
 	"github.com/aquasecurity/trivy/pkg/iac/scanners/options"
 	"github.com/aquasecurity/trivy/pkg/iac/scanners/terraform"
 	tfprawscanner "github.com/aquasecurity/trivy/pkg/iac/scanners/terraformplan/snapshot"
 	tfpjsonscanner "github.com/aquasecurity/trivy/pkg/iac/scanners/terraformplan/tfjson"
-	yamlscanner "github.com/aquasecurity/trivy/pkg/iac/scanners/yaml"
 	"github.com/aquasecurity/trivy/pkg/log"
 	"github.com/aquasecurity/trivy/pkg/mapfs"
+	"github.com/aquasecurity/trivy/pkg/version/app"
+	xslices "github.com/aquasecurity/trivy/pkg/x/slices"
 
 	_ "embed"
 )
@@ -49,17 +52,18 @@ var enablediacTypes = map[detection.FileType]types.ConfigType{
 	detection.FileTypeTerraformPlanSnapshot: types.TerraformPlanSnapshot,
 	detection.FileTypeJSON:                  types.JSON,
 	detection.FileTypeYAML:                  types.YAML,
+	detection.FileTypeAnsible:               types.Ansible,
 }
 
 type ScannerOption struct {
 	Trace                    bool
-	RegoOnly                 bool
 	Namespaces               []string
 	PolicyPaths              []string
 	DataPaths                []string
 	DisableEmbeddedPolicies  bool
 	DisableEmbeddedLibraries bool
 	IncludeDeprecatedChecks  bool
+	RegoErrorLimit           int
 
 	HelmValues              []string
 	HelmValueFiles          []string
@@ -70,10 +74,20 @@ type ScannerOption struct {
 	TerraformTFVars         []string
 	CloudFormationParamVars []string
 	TfExcludeDownloaded     bool
+	RawConfigScanners       []types.ConfigType
 	K8sVersion              string
 
 	FilePatterns      []string
 	ConfigFileSchemas []*ConfigFileSchema
+
+	AnsiblePlaybooks   []string
+	AnsibleInventories []string
+	AnsibleExtraVars   map[string]any
+
+	SkipFiles []string
+	SkipDirs  []string
+
+	RegoScanner *rego.Scanner
 }
 
 func (o *ScannerOption) Sort() {
@@ -114,9 +128,11 @@ func NewScanner(t detection.FileType, opt ScannerOption) (*Scanner, error) {
 	case detection.FileTypeTerraformPlanSnapshot:
 		scanner = tfprawscanner.New(opts...)
 	case detection.FileTypeYAML:
-		scanner = yamlscanner.NewScanner(opts...)
+		scanner = generic.NewYamlScanner(opts...)
 	case detection.FileTypeJSON:
-		scanner = jsonscanner.NewScanner(opts...)
+		scanner = generic.NewJsonScanner(opts...)
+	case detection.FileTypeAnsible:
+		scanner = ansible.New(opts...)
 	default:
 		return nil, xerrors.Errorf("unknown file type: %s", t)
 	}
@@ -130,6 +146,7 @@ func NewScanner(t detection.FileType, opt ScannerOption) (*Scanner, error) {
 }
 
 func (s *Scanner) Scan(ctx context.Context, fsys fs.FS) ([]types.Misconfiguration, error) {
+	ctx = log.WithContextPrefix(ctx, log.PrefixMisconfiguration)
 	newfs, err := s.filterFS(fsys)
 	if err != nil {
 		return nil, xerrors.Errorf("fs filter error: %w", err)
@@ -138,12 +155,12 @@ func (s *Scanner) Scan(ctx context.Context, fsys fs.FS) ([]types.Misconfiguratio
 		return nil, nil
 	}
 
-	log.Debug("Scanning files for misconfigurations...", log.String("scanner", s.scanner.Name()))
+	log.DebugContext(ctx, "Scanning files for misconfigurations...", log.String("scanner", s.scanner.Name()))
 	results, err := s.scanner.ScanFS(ctx, newfs, ".")
 	if err != nil {
 		var invalidContentError *cfparser.InvalidContentError
 		if errors.As(err, &invalidContentError) {
-			log.Error("scan was broken with InvalidContentError", s.scanner.Name(), log.Err(err))
+			log.ErrorContext(ctx, "scan was broken with InvalidContentError", s.scanner.Name(), log.Err(err))
 			return nil, nil
 		}
 		return nil, xerrors.Errorf("scan config error: %w", err)
@@ -174,7 +191,7 @@ func (s *Scanner) filterFS(fsys fs.FS) (fs.FS, error) {
 	})
 
 	var foundRelevantFile bool
-	filter := func(path string, d fs.DirEntry) (bool, error) {
+	filter := func(path string, _ fs.DirEntry) (bool, error) {
 		file, err := fsys.Open(path)
 		if err != nil {
 			return false, err
@@ -207,11 +224,30 @@ func (s *Scanner) filterFS(fsys fs.FS) (fs.FS, error) {
 	return newfs, nil
 }
 
-func scannerOptions(t detection.FileType, opt ScannerOption) ([]options.ScannerOption, error) {
+func InitRegoScanner(opt ScannerOption) (*rego.Scanner, error) {
+	regoOpts, err := initRegoOptions(opt)
+	if err != nil {
+		return nil, xerrors.Errorf("init rego options: %w", err)
+	}
+	regoScanner := rego.NewScanner(regoOpts...)
+	// note: it is safe to pass nil as fsys, since checks and data files will be loaded
+	// from the filesystems passed through the options.
+	if err := regoScanner.LoadPolicies(nil); err != nil {
+		return nil, xerrors.Errorf("load checks: %w", err)
+	}
+	return regoScanner, nil
+}
+
+func initRegoOptions(opt ScannerOption) ([]options.ScannerOption, error) {
 	opts := []options.ScannerOption{
 		rego.WithEmbeddedPolicies(!opt.DisableEmbeddedPolicies),
 		rego.WithEmbeddedLibraries(!opt.DisableEmbeddedLibraries),
-		options.ScannerWithIncludeDeprecatedChecks(opt.IncludeDeprecatedChecks),
+		rego.WithIncludeDeprecatedChecks(opt.IncludeDeprecatedChecks),
+		rego.WithTrivyVersion(app.Version()),
+	}
+
+	if opt.RegoErrorLimit >= 0 {
+		opts = append(opts, rego.WithMaxAllowedErrors(opt.RegoErrorLimit))
 	}
 
 	policyFS, policyPaths, err := CreatePolicyFS(opt.PolicyPaths)
@@ -241,10 +277,6 @@ func scannerOptions(t detection.FileType, opt ScannerOption) ([]options.ScannerO
 		opts = append(opts, rego.WithPerResultTracing(true))
 	}
 
-	if opt.RegoOnly {
-		opts = append(opts, options.ScannerWithRegoOnly(true))
-	}
-
 	if len(policyPaths) > 0 {
 		opts = append(opts, rego.WithPolicyDirs(policyPaths...))
 	}
@@ -256,6 +288,27 @@ func scannerOptions(t detection.FileType, opt ScannerOption) ([]options.ScannerO
 	if len(opt.Namespaces) > 0 {
 		opts = append(opts, rego.WithPolicyNamespaces(opt.Namespaces...))
 	}
+	return opts, nil
+}
+
+func scannerOptions(t detection.FileType, opt ScannerOption) ([]options.ScannerOption, error) {
+	var opts []options.ScannerOption
+
+	if opt.RegoScanner != nil {
+		opts = append(opts, rego.WithRegoScanner(opt.RegoScanner))
+	} else {
+		// If RegoScanner is not provided, pass the Rego options to IaC scanners
+		// so that they can initialize the Rego scanner themselves
+		regoOpts, err := initRegoOptions(opt)
+		if err != nil {
+			return nil, xerrors.Errorf("init rego opts: %w", err)
+		}
+		opts = append(opts, regoOpts...)
+	}
+
+	opts = append(opts, options.WithScanRawConfig(
+		slices.Contains(opt.RawConfigScanners, enablediacTypes[t])),
+	)
 
 	switch t {
 	case detection.FileTypeHelm:
@@ -264,6 +317,8 @@ func scannerOptions(t detection.FileType, opt ScannerOption) ([]options.ScannerO
 		return addTFOpts(opts, opt)
 	case detection.FileTypeCloudFormation:
 		return addCFOpts(opts, opt)
+	case detection.FileTypeAnsible:
+		return addAnsibleOpts(opts, opt), nil
 	default:
 		return opts, nil
 	}
@@ -294,6 +349,8 @@ func addTFOpts(opts []options.ScannerOption, scannerOption ScannerOption) ([]opt
 	opts = append(opts,
 		terraform.ScannerWithAllDirectories(true),
 		terraform.ScannerWithSkipDownloaded(scannerOption.TfExcludeDownloaded),
+		terraform.ScannerWithSkipFiles(scannerOption.SkipFiles),
+		terraform.ScannerWithSkipDirs(scannerOption.SkipDirs),
 	)
 
 	return opts, nil
@@ -342,6 +399,14 @@ func addHelmOpts(opts []options.ScannerOption, scannerOption ScannerOption) []op
 	return opts
 }
 
+func addAnsibleOpts(opts []options.ScannerOption, scannerOpt ScannerOption) []options.ScannerOption {
+	return append(opts,
+		ansible.WithPlaybooks(scannerOpt.AnsiblePlaybooks),
+		ansible.WithInventories(scannerOpt.AnsibleInventories),
+		ansible.WithExtraVars(scannerOpt.AnsibleExtraVars),
+	)
+}
+
 func createConfigFS(paths []string) (fs.FS, error) {
 	mfs := mapfs.New()
 	for _, path := range paths {
@@ -355,6 +420,20 @@ func createConfigFS(paths []string) (fs.FS, error) {
 	return mfs, nil
 }
 
+func CheckPathExists(path string) (fs.FileInfo, string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, "", xerrors.Errorf("failed to derive absolute path from '%s': %w", path, err)
+	}
+	fi, err := os.Stat(abs)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, "", xerrors.Errorf("cache does not exist at %q", abs)
+	} else if err != nil {
+		return nil, "", xerrors.Errorf("file %q stat error: %w", abs, err)
+	}
+	return fi, abs, nil
+}
+
 func CreatePolicyFS(policyPaths []string) (fs.FS, []string, error) {
 	if len(policyPaths) == 0 {
 		return nil, nil, nil
@@ -362,15 +441,9 @@ func CreatePolicyFS(policyPaths []string) (fs.FS, []string, error) {
 
 	mfs := mapfs.New()
 	for _, p := range policyPaths {
-		abs, err := filepath.Abs(p)
+		fi, abs, err := CheckPathExists(p)
 		if err != nil {
-			return nil, nil, xerrors.Errorf("failed to derive absolute path from '%s': %w", p, err)
-		}
-		fi, err := os.Stat(abs)
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil, xerrors.Errorf("policy file %q not found", abs)
-		} else if err != nil {
-			return nil, nil, xerrors.Errorf("file %q stat error: %w", abs, err)
+			return nil, nil, err
 		}
 
 		if fi.IsDir() {
@@ -399,11 +472,11 @@ func CreateDataFS(dataPaths []string, opts ...string) (fs.FS, []string, error) {
 	// Check if k8sVersion is provided
 	if len(opts) > 0 {
 		k8sVersion := opts[0]
-		if err := fsys.MkdirAll("system", 0700); err != nil {
+		if err := fsys.MkdirAll("system", 0o700); err != nil {
 			return nil, nil, err
 		}
-		data := []byte(fmt.Sprintf(`{"k8s": {"version": %q}}`, k8sVersion))
-		if err := fsys.WriteVirtualFile("system/k8s-version.json", data, 0600); err != nil {
+		data := fmt.Appendf(nil, `{"k8s": {"version": %q}}`, k8sVersion)
+		if err := fsys.WriteVirtualFile("system/k8s-version.json", data, 0o600); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -428,21 +501,16 @@ func ResultsToMisconf(configType types.ConfigType, scannerName string, results s
 		flattened := result.Flatten()
 
 		query := fmt.Sprintf("data.%s.%s", result.RegoNamespace(), result.RegoRule())
-
-		ruleID := result.Rule().AVDID
-		if result.RegoNamespace() != "" && len(result.Rule().Aliases) > 0 {
-			ruleID = result.Rule().Aliases[0]
-		}
-
-		cause := NewCauseWithCode(result)
+		cause := NewCauseWithCode(result, flattened)
 
 		misconfResult := types.MisconfResult{
 			Namespace: result.RegoNamespace(),
 			Query:     query,
 			Message:   flattened.Description,
 			PolicyMetadata: types.PolicyMetadata{
-				ID:                 ruleID,
+				ID:                 result.Rule().ID,
 				AVDID:              result.Rule().AVDID,
+				Aliases:            result.Rule().Aliases,
 				Type:               fmt.Sprintf("%s Security Check", scannerName),
 				Title:              result.Rule().Summary,
 				Description:        result.Rule().Explanation,
@@ -463,26 +531,20 @@ func ResultsToMisconf(configType types.ConfigType, scannerName string, results s
 			}
 		}
 
-		if flattened.Warning {
-			misconf.Warnings = append(misconf.Warnings, misconfResult)
-		} else {
-			switch flattened.Status {
-			case scan.StatusPassed:
-				misconf.Successes = append(misconf.Successes, misconfResult)
-			case scan.StatusIgnored:
-				misconf.Exceptions = append(misconf.Exceptions, misconfResult)
-			case scan.StatusFailed:
-				misconf.Failures = append(misconf.Failures, misconfResult)
-			}
+		switch flattened.Status {
+		case scan.StatusPassed:
+			misconf.Successes = append(misconf.Successes, misconfResult)
+		case scan.StatusFailed:
+			misconf.Failures = append(misconf.Failures, misconfResult)
 		}
+
 		misconfs[filePath] = misconf
 	}
 
 	return types.ToMisconfigurations(misconfs)
 }
 
-func NewCauseWithCode(underlying scan.Result) types.CauseMetadata {
-	flat := underlying.Flatten()
+func NewCauseWithCode(underlying scan.Result, flat scan.FlatResult) types.CauseMetadata {
 	cause := types.CauseMetadata{
 		Resource:  flat.Resource,
 		Provider:  flat.RuleProvider.DisplayName(),
@@ -505,9 +567,17 @@ func NewCauseWithCode(underlying scan.Result) types.CauseMetadata {
 	// failures can happen either due to lack of
 	// OR misconfiguration of something
 	if underlying.Status() == scan.StatusFailed {
+		if flat.RenderedCause.Raw != "" {
+			highlighted, _ := scan.Highlight(flat.Location.Filename, flat.RenderedCause.Raw, scan.DarkTheme)
+			cause.RenderedCause = types.RenderedCause{
+				Raw:         flat.RenderedCause.Raw,
+				Highlighted: highlighted,
+			}
+		}
+
 		if code, err := underlying.GetCode(); err == nil {
 			cause.Code = types.Code{
-				Lines: lo.Map(code.Lines, func(l scan.Line, i int) types.Line {
+				Lines: xslices.Map(code.Lines, func(l scan.Line) types.Line {
 					return types.Line{
 						Number:      l.Number,
 						Content:     l.Content,

@@ -12,11 +12,19 @@ import (
 	"github.com/aquasecurity/trivy/pkg/log"
 	"github.com/aquasecurity/trivy/pkg/module"
 	rpcServer "github.com/aquasecurity/trivy/pkg/rpc/server"
+	xhttp "github.com/aquasecurity/trivy/pkg/x/http"
 )
 
 // Run runs the scan
 func Run(ctx context.Context, opts flag.Options) (err error) {
 	log.InitLogger(opts.Debug, opts.Quiet)
+
+	// Set the default HTTP transport
+	xhttp.SetDefaultTransport(xhttp.NewTransport(xhttp.Options{
+		Insecure: opts.Insecure,
+		CACerts:  opts.CACerts,
+		Timeout:  opts.Timeout,
+	}))
 
 	// configure cache dir
 	cacheClient, cleanup, err := cache.New(opts.CacheOpts())
@@ -26,7 +34,7 @@ func Run(ctx context.Context, opts flag.Options) (err error) {
 	defer cleanup()
 
 	// download the database file
-	if err = operation.DownloadDB(ctx, opts.AppVersion, opts.CacheDir, opts.DBRepository,
+	if err = operation.DownloadDB(ctx, opts.AppVersion, opts.CacheDir, opts.DBRepositories,
 		true, opts.SkipDBUpdate, opts.RegistryOpts()); err != nil {
 		return err
 	}
@@ -50,6 +58,6 @@ func Run(ctx context.Context, opts flag.Options) (err error) {
 	m.Register()
 
 	server := rpcServer.NewServer(opts.AppVersion, opts.Listen, opts.CacheDir, opts.Token, opts.TokenHeader,
-		opts.PathPrefix, opts.DBRepository, opts.RegistryOpts())
+		opts.PathPrefix, opts.DBRepositories, opts.RegistryOpts())
 	return server.ListenAndServe(ctx, cacheClient, opts.SkipDBUpdate)
 }

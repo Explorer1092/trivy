@@ -1,7 +1,6 @@
 package vex_test
 
 import (
-	"context"
 	"fmt"
 	"net/http/httptest"
 	"os"
@@ -14,11 +13,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/aquasecurity/trivy/pkg/fanal/artifact"
 	ftypes "github.com/aquasecurity/trivy/pkg/fanal/types"
 	"github.com/aquasecurity/trivy/pkg/log"
 	"github.com/aquasecurity/trivy/pkg/sbom/core"
 	"github.com/aquasecurity/trivy/pkg/types"
+	"github.com/aquasecurity/trivy/pkg/uuid"
 	"github.com/aquasecurity/trivy/pkg/vex"
 )
 
@@ -57,10 +56,38 @@ var (
 			},
 		},
 	}
+	baseFilesPackage = ftypes.Package{
+		ID:      "base-files@5.3",
+		Name:    "base-files",
+		Version: "5.3",
+		Identifier: ftypes.PkgIdentifier{
+			UID: "07",
+			PURL: &packageurl.PackageURL{
+				Type:      packageurl.TypeDebian,
+				Namespace: "debian",
+				Name:      "base-files",
+				Version:   "5.3",
+			},
+		},
+	}
+	baseFiles2Package = ftypes.Package{
+		ID:      "base-files2@5.3",
+		Name:    "base-files2",
+		Version: "5.3",
+		Identifier: ftypes.PkgIdentifier{
+			UID: "08",
+			PURL: &packageurl.PackageURL{
+				Type:      packageurl.TypeDebian,
+				Namespace: "debian",
+				Name:      "base-files2",
+				Version:   "5.3",
+			},
+		},
+	}
 	goModulePackage = ftypes.Package{
-		ID:           "github.com/aquasecurity/go-module@1.0.0",
+		ID:           "github.com/aquasecurity/go-module@v1.0.0",
 		Name:         "github.com/aquasecurity/go-module",
-		Version:      "1.0.0",
+		Version:      "v1.0.0",
 		Relationship: ftypes.RelationshipRoot,
 		Identifier: ftypes.PkgIdentifier{
 			UID: "03",
@@ -68,14 +95,14 @@ var (
 				Type:      packageurl.TypeGolang,
 				Namespace: "github.com/aquasecurity",
 				Name:      "go-module",
-				Version:   "1.0.0",
+				Version:   "v1.0.0",
 			},
 		},
 	}
 	goDirectPackage1 = ftypes.Package{
-		ID:           "github.com/aquasecurity/go-direct1@2.0.0",
+		ID:           "github.com/aquasecurity/go-direct1@v2.0.0",
 		Name:         "github.com/aquasecurity/go-direct1",
-		Version:      "2.0.0",
+		Version:      "v2.0.0",
 		Relationship: ftypes.RelationshipDirect,
 		Identifier: ftypes.PkgIdentifier{
 			UID: "04",
@@ -83,14 +110,14 @@ var (
 				Type:      packageurl.TypeGolang,
 				Namespace: "github.com/aquasecurity",
 				Name:      "go-direct1",
-				Version:   "2.0.0",
+				Version:   "v2.0.0",
 			},
 		},
 	}
 	goDirectPackage2 = ftypes.Package{
-		ID:           "github.com/aquasecurity/go-direct2@3.0.0",
+		ID:           "github.com/aquasecurity/go-direct2@v3.0.0",
 		Name:         "github.com/aquasecurity/go-direct2",
-		Version:      "3.0.0",
+		Version:      "v3.0.0",
 		Relationship: ftypes.RelationshipDirect,
 		Identifier: ftypes.PkgIdentifier{
 			UID: "05",
@@ -98,14 +125,14 @@ var (
 				Type:      packageurl.TypeGolang,
 				Namespace: "github.com/aquasecurity",
 				Name:      "go-direct2",
-				Version:   "3.0.0",
+				Version:   "v3.0.0",
 			},
 		},
 	}
 	goTransitivePackage = ftypes.Package{
-		ID:           "github.com/aquasecurity/go-transitive@4.0.0",
+		ID:           "github.com/aquasecurity/go-transitive@v4.0.0",
 		Name:         "github.com/aquasecurity/go-transitive",
-		Version:      "4.0.0",
+		Version:      "v4.0.0",
 		Relationship: ftypes.RelationshipIndirect,
 		Identifier: ftypes.PkgIdentifier{
 			UID: "06",
@@ -113,7 +140,7 @@ var (
 				Type:      packageurl.TypeGolang,
 				Namespace: "github.com/aquasecurity",
 				Name:      "go-transitive",
-				Version:   "4.0.0",
+				Version:   "v4.0.0",
 			},
 		},
 	}
@@ -157,6 +184,9 @@ func TestMain(m *testing.M) {
 func TestFilter(t *testing.T) {
 	// Set up the OCI registry
 	tr, d := setUpRegistry(t)
+
+	uuid.SetFakeUUID(t, "3ff14136-e09f-4df9-80ea-%012d")
+	testCycloneDXSBOM := createCycloneDXBOMWithSpringComponent()
 
 	type args struct {
 		report *types.Report
@@ -330,11 +360,8 @@ func TestFilter(t *testing.T) {
 			name: "CycloneDX SBOM with CycloneDX VEX",
 			args: args{
 				report: &types.Report{
-					ArtifactType: artifact.TypeCycloneDX,
-					BOM: &core.BOM{
-						SerialNumber: "urn:uuid:3e671687-395b-41f5-a30f-a58921a69b79",
-						Version:      1,
-					},
+					ArtifactType: ftypes.TypeCycloneDX,
+					BOM:          testCycloneDXSBOM,
 					Results: []types.Result{
 						springResult(types.Result{
 							Vulnerabilities: []types.DetectedVulnerability{vuln1},
@@ -351,11 +378,8 @@ func TestFilter(t *testing.T) {
 				},
 			},
 			want: &types.Report{
-				ArtifactType: artifact.TypeCycloneDX,
-				BOM: &core.BOM{
-					SerialNumber: "urn:uuid:3e671687-395b-41f5-a30f-a58921a69b79",
-					Version:      1,
-				},
+				ArtifactType: ftypes.TypeCycloneDX,
+				BOM:          testCycloneDXSBOM,
 				Results: []types.Result{
 					springResult(types.Result{
 						Vulnerabilities:  []types.DetectedVulnerability{},
@@ -368,7 +392,7 @@ func TestFilter(t *testing.T) {
 			name: "CycloneDX VEX wrong URN",
 			args: args{
 				report: &types.Report{
-					ArtifactType: artifact.TypeCycloneDX,
+					ArtifactType: ftypes.TypeCycloneDX,
 					BOM: &core.BOM{
 						SerialNumber: "urn:uuid:wrong",
 						Version:      1,
@@ -389,7 +413,7 @@ func TestFilter(t *testing.T) {
 				},
 			},
 			want: &types.Report{
-				ArtifactType: artifact.TypeCycloneDX,
+				ArtifactType: ftypes.TypeCycloneDX,
 				BOM: &core.BOM{
 					SerialNumber: "urn:uuid:wrong",
 					Version:      1,
@@ -483,7 +507,7 @@ func TestFilter(t *testing.T) {
 			setup: func(t *testing.T, tmpDir string) {
 				// Create repository.yaml
 				vexDir := filepath.Join(tmpDir, ".trivy", "vex")
-				require.NoError(t, os.MkdirAll(vexDir, 0755))
+				require.NoError(t, os.MkdirAll(vexDir, 0o755))
 
 				configPath := filepath.Join(vexDir, "repository.yaml")
 				configContent := `
@@ -491,7 +515,7 @@ repositories:
   - name: default
     url: https://example.com/vex/default
     enabled: true`
-				require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0644))
+				require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0o644))
 			},
 			args: args{
 				report: imageReport([]types.Result{
@@ -544,6 +568,69 @@ repositories:
 			}, fmt.Sprintf("%s/debian@%s", strings.TrimPrefix(tr.URL, "http://"), d.String())),
 		},
 		{
+			name: "infinity loop for OS packages",
+			args: args{
+				// - oci:debian?tag=12
+				//     - pkg:deb/debian/bash@5.3
+				//        - pkg:deb/debian/base-files@5.3
+				//     - pkg:deb/debian/base-files@5.3
+				//        - pkg:deb/debian/bash@5.3
+				report: imageReport([]types.Result{
+					infinityLoopOSPackagesResult(types.Result{
+						Vulnerabilities: []types.DetectedVulnerability{
+							vuln3,
+						},
+					}),
+				}),
+				opts: vex.Options{
+					Sources: []vex.Source{
+						{
+							Type:     vex.TypeFile,
+							FilePath: "testdata/openvex-oci.json",
+						},
+					},
+				},
+			},
+			want: imageReport([]types.Result{
+				infinityLoopOSPackagesResult(types.Result{
+					Vulnerabilities: []types.DetectedVulnerability{
+						vuln3,
+					},
+				}),
+			}),
+		},
+		{
+			name: "check one parent from multiple dependency paths",
+			args: args{
+				// - oci:debian?tag=12
+				//     - pkg:deb/debian/base-files@5.3
+				//        - pkg:deb/debian/bash@5.3
+				//     - pkg:deb/debian/base-files2@5.3
+				//        - pkg:deb/debian/bash@5.3
+				report: imageReport([]types.Result{
+					bashPackagesResult(types.Result{
+						Vulnerabilities: []types.DetectedVulnerability{
+							vuln3,
+						},
+					}),
+				}),
+				opts: vex.Options{
+					Sources: []vex.Source{
+						{
+							Type:     vex.TypeFile,
+							FilePath: "testdata/openvex-oci.json",
+						},
+					},
+				},
+			},
+			want: imageReport([]types.Result{
+				bashPackagesResult(types.Result{
+					Vulnerabilities:  []types.DetectedVulnerability{},
+					ModifiedFindings: []types.ModifiedFinding{modifiedFinding(vuln3, vulnerableCodeNotInExecutePath, "testdata/openvex-oci.json")},
+				}),
+			}),
+		},
+		{
 			name: "unknown format",
 			args: args{
 				report: &types.Report{},
@@ -567,7 +654,7 @@ repositories:
 			if tt.setup != nil {
 				tt.setup(t, tmpDir)
 			}
-			err := vex.Filter(context.Background(), tt.args.report, tt.args.opts)
+			err := vex.Filter(t.Context(), tt.args.report, tt.args.opts)
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
 				return
@@ -581,7 +668,7 @@ repositories:
 func imageReport(results types.Results) *types.Report {
 	return &types.Report{
 		ArtifactName: "debian:12",
-		ArtifactType: artifact.TypeContainerImage,
+		ArtifactType: ftypes.TypeContainerImage,
 		Metadata: types.Metadata{
 			RepoDigests: []string{
 				"debian@sha256:4482958b4461ff7d9fabc24b3a9ab1e9a2c85ece07b2db1840c7cbc01d053e90",
@@ -619,10 +706,31 @@ func ociPURLString(ts *httptest.Server, d v1.Hash) string {
 	return p.String()
 }
 
+func createCycloneDXBOMWithSpringComponent() *core.BOM {
+	bom := core.NewBOM(core.Options{})
+	bom.SerialNumber = "urn:uuid:3e671687-395b-41f5-a30f-a58921a69b79"
+	bom.Version = 1
+	pkgIdentifier := ftypes.PkgIdentifier{
+		// Components got from scanned SBOM files don't have UID
+		BOMRef: springPackage.Identifier.BOMRef,
+		PURL:   springPackage.Identifier.PURL,
+	}
+	// Add the spring component to match vuln1's BOM-Ref
+	springComponent := &core.Component{
+		Type:          core.TypeLibrary,
+		Name:          springPackage.Identifier.PURL.Name,
+		Group:         springPackage.Identifier.PURL.Namespace,
+		Version:       springPackage.Version,
+		PkgIdentifier: pkgIdentifier,
+	}
+	bom.AddComponent(springComponent)
+	return bom
+}
+
 func fsReport(results types.Results) *types.Report {
 	return &types.Report{
 		ArtifactName: ".",
-		ArtifactType: artifact.TypeFilesystem,
+		ArtifactType: ftypes.TypeFilesystem,
 		Results:      results,
 	}
 }
@@ -642,13 +750,51 @@ func bashResult(result types.Result) types.Result {
 	return result
 }
 
+func bashPackagesResult(result types.Result) types.Result {
+	result.Type = ftypes.Debian
+	result.Class = types.ClassOSPkg
+
+	bashPkg := clonePackage(bashPackage)
+	baseFilesPkg := clonePackage(baseFilesPackage)
+	baseFiles2Pkg := clonePackage(baseFiles2Package)
+
+	baseFilesPkg.DependsOn = []string{bashPkg.ID}
+	baseFiles2Pkg.DependsOn = []string{bashPkg.ID}
+
+	result.Packages = []ftypes.Package{
+		bashPkg,
+		baseFilesPkg,
+		baseFiles2Pkg,
+	}
+
+	return result
+}
+
+func infinityLoopOSPackagesResult(result types.Result) types.Result {
+	result.Type = ftypes.Debian
+	result.Class = types.ClassOSPkg
+
+	bashPkg := clonePackage(bashPackage)
+	baseFilesPkg := clonePackage(baseFilesPackage)
+
+	bashPkg.DependsOn = []string{baseFilesPkg.ID}
+	baseFilesPkg.DependsOn = []string{bashPkg.ID}
+
+	result.Packages = []ftypes.Package{
+		bashPkg,
+		baseFilesPkg,
+	}
+
+	return result
+}
+
 func goSinglePathResult(result types.Result) types.Result {
 	result.Type = ftypes.GoModule
 	result.Class = types.ClassLangPkg
 
-	// - pkg:golang/github.com/aquasecurity/go-module@1.0.0
-	//     - pkg:golang/github.com/aquasecurity/go-direct1@2.0.0
-	//         - pkg:golang/github.com/aquasecurity/go-transitive@4.0.0
+	// - pkg:golang/github.com/aquasecurity/go-module@v1.0.0
+	//     - pkg:golang/github.com/aquasecurity/go-direct1@v2.0.0
+	//         - pkg:golang/github.com/aquasecurity/go-transitive@v4.0.0
 	goModule := clonePackage(goModulePackage)
 	goDirect1 := clonePackage(goDirectPackage1)
 	goTransitive := clonePackage(goTransitivePackage)
@@ -667,11 +813,11 @@ func goMultiPathResult(result types.Result) types.Result {
 	result.Type = ftypes.GoModule
 	result.Class = types.ClassLangPkg
 
-	// - pkg:golang/github.com/aquasecurity/go-module@2.0.0
-	//     - pkg:golang/github.com/aquasecurity/go-direct1@3.0.0
-	//         - pkg:golang/github.com/aquasecurity/go-transitive@5.0.0
-	//     - pkg:golang/github.com/aquasecurity/go-direct2@4.0.0
-	//         - pkg:golang/github.com/aquasecurity/go-transitive@5.0.0
+	// - pkg:golang/github.com/aquasecurity/go-module@v1.0.0
+	//     - pkg:golang/github.com/aquasecurity/go-direct1@v2.0.0
+	//         - pkg:golang/github.com/aquasecurity/go-transitive@v5.0.0
+	//     - pkg:golang/github.com/aquasecurity/go-direct2@v3.0.0
+	//         - pkg:golang/github.com/aquasecurity/go-transitive@v4.0.0
 	goModule := clonePackage(goModulePackage)
 	goDirect1 := clonePackage(goDirectPackage1)
 	goDirect2 := clonePackage(goDirectPackage2)

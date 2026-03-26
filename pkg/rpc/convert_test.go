@@ -1,10 +1,13 @@
 package rpc
 
 import (
+	jsonv2 "encoding/json/v2"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	dbTypes "github.com/aquasecurity/trivy-db/pkg/types"
@@ -53,8 +56,9 @@ func TestConvertToRpcPkgs(t *testing.T) {
 							Digest: "sha256:6a428f9f83b0a29f1fdd2ccccca19a9bab805a925b8eddf432a5a3d3da04afbc",
 							DiffID: "sha256:39982b2a789afc156fff00c707d0ff1c6ab4af8f1666a8df4787714059ce24e7",
 						},
-						Digest:   "SHA1:901a7b55410321c4d35543506cff2a8613ef5aa2",
-						Indirect: true,
+						Digest:       "SHA1:901a7b55410321c4d35543506cff2a8613ef5aa2",
+						Indirect:     true,
+						Relationship: ftypes.RelationshipIndirect,
 						Identifier: ftypes.PkgIdentifier{
 							UID: "01",
 						},
@@ -87,8 +91,9 @@ func TestConvertToRpcPkgs(t *testing.T) {
 						Digest: "sha256:6a428f9f83b0a29f1fdd2ccccca19a9bab805a925b8eddf432a5a3d3da04afbc",
 						DiffId: "sha256:39982b2a789afc156fff00c707d0ff1c6ab4af8f1666a8df4787714059ce24e7",
 					},
-					Digest:   "SHA1:901a7b55410321c4d35543506cff2a8613ef5aa2",
-					Indirect: true,
+					Digest:       "SHA1:901a7b55410321c4d35543506cff2a8613ef5aa2",
+					Indirect:     true,
+					Relationship: 4,
 					Identifier: &common.PkgIdentifier{
 						Uid: "01",
 					},
@@ -141,8 +146,9 @@ func TestConvertFromRpcPkgs(t *testing.T) {
 							Digest: "sha256:6a428f9f83b0a29f1fdd2ccccca19a9bab805a925b8eddf432a5a3d3da04afbc",
 							DiffId: "sha256:39982b2a789afc156fff00c707d0ff1c6ab4af8f1666a8df4787714059ce24e7",
 						},
-						Digest:   "SHA1:901a7b55410321c4d35543506cff2a8613ef5aa2",
-						Indirect: true,
+						Digest:       "SHA1:901a7b55410321c4d35543506cff2a8613ef5aa2",
+						Relationship: 4,
+						Indirect:     true,
 						Identifier: &common.PkgIdentifier{
 							Uid: "01",
 						},
@@ -175,11 +181,86 @@ func TestConvertFromRpcPkgs(t *testing.T) {
 						Digest: "sha256:6a428f9f83b0a29f1fdd2ccccca19a9bab805a925b8eddf432a5a3d3da04afbc",
 						DiffID: "sha256:39982b2a789afc156fff00c707d0ff1c6ab4af8f1666a8df4787714059ce24e7",
 					},
-					Digest:   "SHA1:901a7b55410321c4d35543506cff2a8613ef5aa2",
-					Indirect: true,
+					Digest:       "SHA1:901a7b55410321c4d35543506cff2a8613ef5aa2",
+					Relationship: ftypes.RelationshipIndirect,
+					Indirect:     true,
 					Identifier: ftypes.PkgIdentifier{
 						UID: "01",
 					},
+				},
+			},
+		},
+		{
+			args: args{
+				rpcPkgs: []*common.Package{
+					{
+						Name:       "binary",
+						Version:    "4.2+dfsg",
+						Release:    "0.1+deb7u4",
+						Epoch:      0,
+						Arch:       "amd64",
+						SrcName:    "bash",
+						SrcVersion: "4.2+dfsg",
+						SrcRelease: "0.1+deb7u4",
+						SrcEpoch:   0,
+						Licenses:   []string{"GPL-3.0"},
+						Locations: []*common.Location{
+							{
+								StartLine: 10,
+								EndLine:   20,
+							},
+							{
+								StartLine: 22,
+								EndLine:   32,
+							},
+						},
+						Layer: &common.Layer{
+							Digest: "sha256:8d42b73fc1ddc2e9e66c954966f144665825e69f4ed10c66342ae7c26b38d4e4",
+							DiffId: "sha256:745d171eb8c3d69f788da3a1b053056231ad140b80be71d6869229846a1f3a77",
+						},
+						Digest:       "SHA1:901a7b55410321c4d35543506cff2a8613ef5aa2",
+						Indirect:     false,
+						Relationship: 3,
+						Identifier: &common.PkgIdentifier{
+							Uid: "63f8bef824b960e3",
+						},
+						Maintainer: "alice@example.com",
+					},
+				},
+			},
+			want: []ftypes.Package{
+				{
+					Name:       "binary",
+					Version:    "4.2+dfsg",
+					Release:    "0.1+deb7u4",
+					Epoch:      0,
+					Arch:       "amd64",
+					SrcName:    "bash",
+					SrcVersion: "4.2+dfsg",
+					SrcRelease: "0.1+deb7u4",
+					SrcEpoch:   0,
+					Licenses:   []string{"GPL-3.0"},
+					Locations: []ftypes.Location{
+						{
+							StartLine: 10,
+							EndLine:   20,
+						},
+						{
+							StartLine: 22,
+							EndLine:   32,
+						},
+					},
+					Layer: ftypes.Layer{
+						Digest: "sha256:8d42b73fc1ddc2e9e66c954966f144665825e69f4ed10c66342ae7c26b38d4e4",
+						DiffID: "sha256:745d171eb8c3d69f788da3a1b053056231ad140b80be71d6869229846a1f3a77",
+					},
+					Digest:       "SHA1:901a7b55410321c4d35543506cff2a8613ef5aa2",
+					Relationship: ftypes.RelationshipDirect,
+					Indirect:     false,
+					Identifier: ftypes.PkgIdentifier{
+						UID: "63f8bef824b960e3",
+					},
+					Maintainer: "alice@example.com",
 				},
 			},
 		},
@@ -195,6 +276,14 @@ func TestConvertFromRpcPkgs(t *testing.T) {
 func TestConvertToRpcVulns(t *testing.T) {
 	fixedPublishedDate := time.Unix(1257894000, 0)
 	fixedLastModifiedDate := time.Unix(1257894010, 0)
+	type customStruct struct {
+		Field  string
+		Number int
+	}
+	customData := customStruct{Field: "value", Number: 1}
+	customJSONBytes, err := jsonv2.Marshal(customData)
+	require.NoError(t, err)
+	customJSON := string(customJSONBytes)
 
 	type args struct {
 		vulns []types.DetectedVulnerability
@@ -217,6 +306,7 @@ func TestConvertToRpcVulns(t *testing.T) {
 							Title:       "DoS",
 							Description: "Denial of Service",
 							Severity:    "MEDIUM",
+							Custom:      customData,
 							VendorSeverity: dbTypes.VendorSeverity{
 								vulnerability.RedHat: dbTypes.SeverityMedium,
 							},
@@ -226,6 +316,14 @@ func TestConvertToRpcVulns(t *testing.T) {
 									V3Vector: "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
 									V2Score:  7.2,
 									V3Score:  7.8,
+								},
+								vulnerability.NVD: {
+									V2Vector:  "AV:L/AC:L/Au:N/C:C/I:C/A:C",
+									V3Vector:  "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+									V40Vector: "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N/U:Green",
+									V2Score:   7.2,
+									V3Score:   7.8,
+									V40Score:  8.7,
 								},
 							},
 							References:       []string{"http://example.com"},
@@ -241,6 +339,7 @@ func TestConvertToRpcVulns(t *testing.T) {
 							Name: "GitHub Security Advisory Maven",
 							URL:  "https://github.com/advisories?query=type%3Areviewed+ecosystem%3Amaven",
 						},
+						Custom: customData,
 					},
 				},
 			},
@@ -263,15 +362,25 @@ func TestConvertToRpcVulns(t *testing.T) {
 							V2Score:  7.2,
 							V3Score:  7.8,
 						},
+						"nvd": {
+							V2Vector:  "AV:L/AC:L/Au:N/C:C/I:C/A:C",
+							V3Vector:  "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+							V40Vector: "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N/U:Green",
+							V2Score:   7.2,
+							V3Score:   7.8,
+							V40Score:  8.7,
+						},
 					},
 					References: []string{"http://example.com"},
 					Layer: &common.Layer{
 						Digest: "sha256:154ad0735c360b212b167f424d33a62305770a1fcfb6363882f5c436cfbd9812",
 						DiffId: "sha256:b2a1a2d80bf0c747a4f6b0ca6af5eef23f043fcdb1ed4f3a3e750aef2dc68079",
 					},
-					PrimaryUrl:       "https://avd.aquasec.com/nvd/CVE-2019-0001",
-					PublishedDate:    timestamppb.New(fixedPublishedDate),
-					LastModifiedDate: timestamppb.New(fixedLastModifiedDate),
+					CustomVulnData:     structpb.NewStringValue(customJSON),
+					CustomAdvisoryData: structpb.NewStringValue(customJSON),
+					PrimaryUrl:         "https://avd.aquasec.com/nvd/CVE-2019-0001",
+					PublishedDate:      timestamppb.New(fixedPublishedDate),
+					LastModifiedDate:   timestamppb.New(fixedLastModifiedDate),
 					DataSource: &common.DataSource{
 						Name: "GitHub Security Advisory Maven",
 						Url:  "https://github.com/advisories?query=type%3Areviewed+ecosystem%3Amaven",
@@ -340,6 +449,7 @@ func TestConvertToRpcVulns(t *testing.T) {
 func TestConvertFromRPCResults(t *testing.T) {
 	fixedPublishedDate := time.Date(2009, 11, 10, 23, 0, 0, 0, time.UTC)
 	fixedLastModifiedDate := time.Date(2009, 11, 10, 23, 0, 10, 0, time.UTC)
+	customJSON := `{"Field":"value","Number":1}`
 
 	type args struct {
 		rpcResults []*scanner.Result
@@ -386,9 +496,11 @@ func TestConvertFromRPCResults(t *testing.T) {
 									Digest: "sha256:154ad0735c360b212b167f424d33a62305770a1fcfb6363882f5c436cfbd9812",
 									DiffId: "sha256:b2a1a2d80bf0c747a4f6b0ca6af5eef23f043fcdb1ed4f3a3e750aef2dc68079",
 								},
-								PrimaryUrl:       "https://avd.aquasec.com/nvd/CVE-2019-0001",
-								PublishedDate:    timestamppb.New(fixedPublishedDate),
-								LastModifiedDate: timestamppb.New(fixedLastModifiedDate),
+								CustomVulnData:     structpb.NewStringValue(customJSON),
+								CustomAdvisoryData: structpb.NewStringValue(customJSON),
+								PrimaryUrl:         "https://avd.aquasec.com/nvd/CVE-2019-0001",
+								PublishedDate:      timestamppb.New(fixedPublishedDate),
+								LastModifiedDate:   timestamppb.New(fixedLastModifiedDate),
 								DataSource: &common.DataSource{
 									Name: "GitHub Security Advisory Maven",
 									Url:  "https://github.com/advisories?query=type%3Areviewed+ecosystem%3Amaven",
@@ -436,11 +548,13 @@ func TestConvertFromRPCResults(t *testing.T) {
 								References:       []string{"http://example.com"},
 								PublishedDate:    &fixedPublishedDate,
 								LastModifiedDate: &fixedLastModifiedDate,
+								Custom:           customJSON,
 							},
 							DataSource: &dbTypes.DataSource{
 								Name: "GitHub Security Advisory Maven",
 								URL:  "https://github.com/advisories?query=type%3Areviewed+ecosystem%3Amaven",
 							},
+							Custom: customJSON,
 						},
 					},
 				},
@@ -522,7 +636,9 @@ func TestConvertFromRPCResults(t *testing.T) {
 									},
 								},
 								References: []string{"http://example.com"},
+								Custom:     any(nil),
 							},
+							Custom: any(nil),
 						},
 					},
 				},
@@ -554,6 +670,7 @@ func TestConvertFromRPCMisconfs(t *testing.T) {
 						Type:        "Dockerfile Security Check",
 						Id:          "DS005",
 						AvdId:       "AVD-DS-0005",
+						Aliases:     []string{"use-copy-over-add"},
 						Title:       "ADD instead of COPY",
 						Description: "You should use COPY instead of ADD unless you want to extract a tar file. Note that an ADD command will extract a tar file, which adds the risk of Zip-based vulnerabilities. Accordingly, it is advised to use a COPY command, which does not extract tar files.",
 						Message:     "Consider using 'COPY . /app' command instead of 'ADD . /app'",
@@ -595,6 +712,7 @@ func TestConvertFromRPCMisconfs(t *testing.T) {
 					Type:        "Dockerfile Security Check",
 					ID:          "DS005",
 					AVDID:       "AVD-DS-0005",
+					Aliases:     []string{"use-copy-over-add"},
 					Title:       "ADD instead of COPY",
 					Description: "You should use COPY instead of ADD unless you want to extract a tar file. Note that an ADD command will extract a tar file, which adds the risk of Zip-based vulnerabilities. Accordingly, it is advised to use a COPY command, which does not extract tar files.",
 					Message:     "Consider using 'COPY . /app' command instead of 'ADD . /app'",
@@ -658,6 +776,7 @@ func TestConvertToRPCMiconfs(t *testing.T) {
 						Type:        "Dockerfile Security Check",
 						ID:          "DS005",
 						AVDID:       "AVD-DS-0005",
+						Aliases:     []string{"use-copy-over-add"},
 						Title:       "ADD instead of COPY",
 						Description: "You should use COPY instead of ADD unless you want to extract a tar file. Note that an ADD command will extract a tar file, which adds the risk of Zip-based vulnerabilities. Accordingly, it is advised to use a COPY command, which does not extract tar files.",
 						Message:     "Consider using 'COPY . /app' command instead of 'ADD . /app'",
@@ -699,6 +818,7 @@ func TestConvertToRPCMiconfs(t *testing.T) {
 					Type:        "Dockerfile Security Check",
 					Id:          "DS005",
 					AvdId:       "AVD-DS-0005",
+					Aliases:     []string{"use-copy-over-add"},
 					Title:       "ADD instead of COPY",
 					Description: "You should use COPY instead of ADD unless you want to extract a tar file. Note that an ADD command will extract a tar file, which adds the risk of Zip-based vulnerabilities. Accordingly, it is advised to use a COPY command, which does not extract tar files.",
 					Message:     "Consider using 'COPY . /app' command instead of 'ADD . /app'",
@@ -731,6 +851,7 @@ func TestConvertToRPCMiconfs(t *testing.T) {
 								},
 							},
 						},
+						RenderedCause: &common.RenderedCause{},
 					},
 				},
 			},

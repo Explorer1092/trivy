@@ -1,6 +1,7 @@
 package julia
 
 import (
+	"context"
 	"io"
 	"sort"
 
@@ -31,7 +32,7 @@ func NewParser() *Parser {
 	return &Parser{}
 }
 
-func (p *Parser) Parse(r xio.ReadSeekerAt) ([]ftypes.Package, []ftypes.Dependency, error) {
+func (p *Parser) Parse(_ context.Context, r xio.ReadSeekerAt) ([]ftypes.Package, []ftypes.Dependency, error) {
 	var oldDeps map[string][]primitiveDependency
 	var primMan primitiveManifest
 	var manMetadata toml.MetaData
@@ -140,6 +141,9 @@ func decodeDependency(man *primitiveManifest, dep primitiveDependency, metadata 
 		var possibleUuids []string
 		for _, depName := range possibleDeps {
 			primDep := man.Dependencies[depName]
+			if len(primDep) == 0 {
+				return primitiveDependency{}, xerrors.Errorf("Dependency %q has invalid format (parsed no deps): %s", depName, primDep)
+			}
 			if len(primDep) > 1 {
 				return primitiveDependency{}, xerrors.Errorf("Dependency %q has invalid format (parsed multiple deps): %s", depName, primDep)
 			}

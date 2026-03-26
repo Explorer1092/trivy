@@ -4,6 +4,7 @@ import (
 	"io"
 	"io/fs"
 
+	"github.com/aquasecurity/trivy/pkg/iac/framework"
 	"github.com/aquasecurity/trivy/pkg/iac/scanners/options"
 )
 
@@ -68,9 +69,7 @@ func WithDataDirs(paths ...string) options.ScannerOption {
 func WithPolicyNamespaces(namespaces ...string) options.ScannerOption {
 	return func(s options.ConfigurableScanner) {
 		if ss, ok := s.(*Scanner); ok {
-			for _, namespace := range namespaces {
-				ss.ruleNamespaces[namespace] = struct{}{}
-			}
+			ss.ruleNamespaces.Append(namespaces...)
 		}
 	}
 }
@@ -91,10 +90,10 @@ func WithDataFilesystem(fsys fs.FS) options.ScannerOption {
 	}
 }
 
-func WithRegoErrorLimits(limit int) options.ScannerOption {
+func WithMaxAllowedErrors(limit int) options.ScannerOption {
 	return func(s options.ConfigurableScanner) {
 		if ss, ok := s.(*Scanner); ok {
-			ss.regoErrorLimit = limit
+			ss.maxAllowedErrors = limit
 		}
 	}
 }
@@ -103,6 +102,30 @@ func WithCustomSchemas(schemas map[string][]byte) options.ScannerOption {
 	return func(s options.ConfigurableScanner) {
 		if ss, ok := s.(*Scanner); ok {
 			ss.customSchemas = schemas
+		}
+	}
+}
+
+func WithIncludeDeprecatedChecks(include bool) options.ScannerOption {
+	return func(s options.ConfigurableScanner) {
+		if ss, ok := s.(*Scanner); ok {
+			ss.includeDeprecatedChecks = include
+		}
+	}
+}
+
+func WithFrameworks(frameworks ...framework.Framework) options.ScannerOption {
+	return func(s options.ConfigurableScanner) {
+		if ss, ok := s.(*Scanner); ok {
+			ss.frameworks = frameworks
+		}
+	}
+}
+
+func WithTrivyVersion(version string) options.ScannerOption {
+	return func(s options.ConfigurableScanner) {
+		if ss, ok := s.(*Scanner); ok {
+			ss.moduleFilters = append(ss.moduleFilters, TrivyVersionFilter(version))
 		}
 	}
 }

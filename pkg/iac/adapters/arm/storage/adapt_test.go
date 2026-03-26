@@ -3,55 +3,100 @@ package storage
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-
-	azure2 "github.com/aquasecurity/trivy/pkg/iac/scanners/azure"
+	"github.com/aquasecurity/trivy/pkg/iac/adapters/arm/adaptertest"
+	"github.com/aquasecurity/trivy/pkg/iac/providers/azure/storage"
 	"github.com/aquasecurity/trivy/pkg/iac/types"
 )
 
-func Test_AdaptStorageDefaults(t *testing.T) {
-
-	input := azure2.Deployment{
-		Resources: []azure2.Resource{
-			{
-				Type:       azure2.NewValue("Microsoft.Storage/storageAccounts", types.NewTestMetadata()),
-				Properties: azure2.NewValue(make(map[string]azure2.Value), types.NewTestMetadata()),
+func TestAdapt(t *testing.T) {
+	tests := []struct {
+		name     string
+		source   string
+		expected storage.Storage
+	}{
+		{
+			name: "empty",
+			source: `{
+  "resources": [
+    {
+      "type": "Microsoft.Storage/storageAccounts",
+      "properties": {}
+    }
+  ]
+}`,
+			expected: storage.Storage{
+				Accounts: []storage.Account{{
+					MinimumTLSVersion: types.StringTest("TLS1_0"),
+					EnforceHTTPS:      types.BoolTest(true),
+					NetworkRules: []storage.NetworkRule{{
+						Bypass:         []types.StringValue{types.StringTest("AzureServices")},
+						AllowByDefault: types.BoolTest(true),
+					}},
+					PublicNetworkAccess:             types.BoolTest(true),
+					AccountReplicationType:          types.StringTest(""),
+					InfrastructureEncryptionEnabled: types.BoolTest(false),
+					BlobProperties: storage.BlobProperties{
+						DeleteRetentionPolicy: storage.DeleteRetentionPolicy{
+							Days: types.IntTest(0),
+						},
+					},
+					CustomerManagedKey: storage.CustomerManagedKey{
+						KeyVaultKeyId:          types.StringTest(""),
+						UserAssignedIdentityId: types.StringTest(""),
+					},
+				}},
+			},
+		},
+		{
+			name: "complete",
+			source: `{
+  "resources": [
+    {
+      "type": "Microsoft.Storage/storageAccounts",
+      "name": null,
+      "properties": {
+        "minimumTlsVersion": "TLS1_2",
+        "supportsHttpsTrafficOnly": true,
+        "publicNetworkAccess": "Disabled",
+        "networkAcls": {
+          "bypass": "Logging, Metrics",
+          "defaultAction": "Allow"
+        }
+      }
+    }
+  ]
+}`,
+			expected: storage.Storage{
+				Accounts: []storage.Account{{
+					MinimumTLSVersion:               types.StringTest("TLS1_2"),
+					EnforceHTTPS:                    types.BoolTest(true),
+					PublicNetworkAccess:             types.BoolTest(false),
+					AccountReplicationType:          types.StringTest(""),
+					InfrastructureEncryptionEnabled: types.BoolTest(false),
+					NetworkRules: []storage.NetworkRule{{
+						Bypass: []types.StringValue{
+							types.StringTest("Logging"),
+							types.StringTest("Metrics"),
+						},
+						AllowByDefault: types.BoolTest(true),
+					}},
+					BlobProperties: storage.BlobProperties{
+						DeleteRetentionPolicy: storage.DeleteRetentionPolicy{
+							Days: types.IntTest(0),
+						},
+					},
+					CustomerManagedKey: storage.CustomerManagedKey{
+						KeyVaultKeyId:          types.StringTest(""),
+						UserAssignedIdentityId: types.StringTest(""),
+					},
+				}},
 			},
 		},
 	}
 
-	output := Adapt(input)
-
-	require.Len(t, output.Accounts, 1)
-
-	account := output.Accounts[0]
-	assert.Equal(t, "", account.MinimumTLSVersion.Value())
-	assert.False(t, account.EnforceHTTPS.Value())
-
-}
-
-func Test_AdaptStorage(t *testing.T) {
-
-	input := azure2.Deployment{
-		Resources: []azure2.Resource{
-			{
-				Type: azure2.NewValue("Microsoft.Storage/storageAccounts", types.NewTestMetadata()),
-				Name: azure2.Value{},
-				Properties: azure2.NewValue(map[string]azure2.Value{
-					"minimumTlsVersion":        azure2.NewValue("TLS1_2", types.NewTestMetadata()),
-					"supportsHttpsTrafficOnly": azure2.NewValue(true, types.NewTestMetadata()),
-				}, types.NewTestMetadata()),
-			},
-		},
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			adaptertest.AdaptAndCompare(t, tt.source, tt.expected, Adapt)
+		})
 	}
-
-	output := Adapt(input)
-
-	require.Len(t, output.Accounts, 1)
-
-	account := output.Accounts[0]
-	assert.Equal(t, "TLS1_2", account.MinimumTLSVersion.Value())
-	assert.True(t, account.EnforceHTTPS.Value())
-
 }

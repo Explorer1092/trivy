@@ -20,6 +20,8 @@ import (
 	"github.com/aquasecurity/trivy/pkg/sbom"
 )
 
+const artifactVersion = 0
+
 type Artifact struct {
 	filePath       string
 	cache          cache.ArtifactCache
@@ -69,17 +71,17 @@ func (a Artifact) Inspect(ctx context.Context) (artifact.Reference, error) {
 		return artifact.Reference{}, xerrors.Errorf("failed to calculate a cache key: %w", err)
 	}
 
-	if err = a.cache.PutBlob(cacheKey, blobInfo); err != nil {
+	if err = a.cache.PutBlob(ctx, cacheKey, blobInfo); err != nil {
 		return artifact.Reference{}, xerrors.Errorf("failed to store blob (%s) in cache: %w", cacheKey, err)
 	}
 
-	var artifactType artifact.Type
+	var artifactType types.ArtifactType
 	switch format {
-	case sbom.FormatCycloneDXJSON, sbom.FormatCycloneDXXML, sbom.FormatAttestCycloneDXJSON, sbom.FormatLegacyCosignAttestCycloneDXJSON:
-		artifactType = artifact.TypeCycloneDX
-	case sbom.FormatSPDXTV, sbom.FormatSPDXJSON:
-		artifactType = artifact.TypeSPDX
-
+	case sbom.FormatCycloneDXJSON, sbom.FormatCycloneDXXML, sbom.FormatAttestCycloneDXJSON,
+		sbom.FormatLegacyCosignAttestCycloneDXJSON, sbom.FormatSigstoreBundleCycloneDXJSON:
+		artifactType = types.TypeCycloneDX
+	case sbom.FormatSPDXTV, sbom.FormatSPDXJSON, sbom.FormatAttestSPDXJSON, sbom.FormatSigstoreBundleSPDXJSON:
+		artifactType = types.TypeSPDX
 	}
 
 	return artifact.Reference{
@@ -87,6 +89,13 @@ func (a Artifact) Inspect(ctx context.Context) (artifact.Reference, error) {
 		Type:    artifactType,
 		ID:      cacheKey, // use a cache key as pseudo artifact ID
 		BlobIDs: []string{cacheKey},
+		ImageMetadata: artifact.ImageMetadata{
+			ID:          bom.Metadata.ImageID,
+			DiffIDs:     bom.Metadata.DiffIDs,
+			RepoTags:    bom.Metadata.RepoTags,
+			RepoDigests: bom.Metadata.RepoDigests,
+			Reference:   bom.Metadata.Reference,
+		},
 
 		// Keep an original report
 		BOM: bom.BOM,
@@ -94,7 +103,7 @@ func (a Artifact) Inspect(ctx context.Context) (artifact.Reference, error) {
 }
 
 func (a Artifact) Clean(reference artifact.Reference) error {
-	return a.cache.DeleteBlobs(reference.BlobIDs)
+	return a.cache.DeleteBlobs(context.TODO(), reference.BlobIDs)
 }
 
 func (a Artifact) calcCacheKey(blobInfo types.BlobInfo) (string, error) {
@@ -105,7 +114,7 @@ func (a Artifact) calcCacheKey(blobInfo types.BlobInfo) (string, error) {
 	}
 
 	d := digest.NewDigest(digest.SHA256, h)
-	cacheKey, err := cache.CalcKey(d.String(), a.analyzer.AnalyzerVersions(), a.handlerManager.Versions(), a.artifactOption)
+	cacheKey, err := cache.CalcKey(d.String(), artifactVersion, a.analyzer.AnalyzerVersions(), a.handlerManager.Versions(), a.artifactOption)
 	if err != nil {
 		return "", xerrors.Errorf("cache key: %w", err)
 	}

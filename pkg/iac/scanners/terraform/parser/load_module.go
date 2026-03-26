@@ -2,6 +2,7 @@ package parser
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"path"
@@ -24,7 +25,7 @@ type ModuleDefinition struct {
 }
 
 func (d *ModuleDefinition) inputVars() map[string]cty.Value {
-	inputs := d.Definition.Values().AsValueMap()
+	inputs := d.Definition.NullableValues().AsValueMap()
 	if inputs == nil {
 		return make(map[string]cty.Value)
 	}
@@ -43,7 +44,9 @@ func (e *evaluator) loadModules(ctx context.Context) []*ModuleDefinition {
 		}
 		moduleDefinition, err := e.loadModule(ctx, moduleBlock)
 		if err != nil {
-			e.logger.Error("Failed to load module. Maybe try 'terraform init'?", log.Err(err))
+			rng := moduleBlock.GetMetadata().Range()
+			e.logger.Error("Failed to load module. Maybe try 'terraform init'?",
+				log.String("loc", rng.String()), log.Err(err))
 			continue
 		}
 
@@ -56,30 +59,33 @@ func (e *evaluator) loadModules(ctx context.Context) []*ModuleDefinition {
 
 // takes in a module "x" {} block and loads resources etc. into e.moduleBlocks - additionally returns variables to add to ["module.x.*"] variables
 func (e *evaluator) loadModule(ctx context.Context, b *terraform.Block) (*ModuleDefinition, error) {
-
-	metadata := b.GetMetadata()
-
 	if b.Label() == "" {
-		return nil, fmt.Errorf("module without label at %s", metadata.Range())
+		return nil, errors.New("module without label")
 	}
 
-	var source string
-	attrs := b.Attributes()
-	for _, attr := range attrs {
-		if attr.Name() == "source" {
-			sourceVal := attr.Value()
-			if sourceVal.Type() == cty.String {
-				source = sourceVal.AsString()
-			}
-		}
+	sourceVal := b.GetAttribute("source").Value()
+	if !sourceVal.IsKnown() || sourceVal.Type() != cty.String {
+		return nil, errors.New("source is not a string")
 	}
+
+	source := sourceVal.AsString()
 	if source == "" {
-		return nil, fmt.Errorf("could not read module source attribute at %s", metadata.Range().String())
+		return nil, errors.New("source is empty")
 	}
 
-	if def, err := e.loadModuleFromTerraformCache(ctx, b, source); err == nil {
-		e.logger.Debug("Using module from Terraform cache .terraform/modules", log.String("source", source))
-		return def, nil
+	if e.moduleMetadata != nil {
+		// if we have module metadata we can parse all the modules as they'll be cached locally!
+		def, err := e.loadModuleFromTerraformCache(ctx, b, source)
+		if err == nil {
+			e.logger.Debug("Using module from Terraform cache .terraform/modules",
+				log.String("source", source))
+			return def, nil
+		}
+
+		e.logger.Debug("Failed to load module from .terraform cache",
+			log.String("module_source", source),
+			log.Err(err),
+		)
 	}
 
 	// we don't have the module installed via 'terraform init' so we need to grab it...
@@ -88,27 +94,19 @@ func (e *evaluator) loadModule(ctx context.Context, b *terraform.Block) (*Module
 
 func (e *evaluator) loadModuleFromTerraformCache(ctx context.Context, b *terraform.Block, source string) (*ModuleDefinition, error) {
 	var modulePath string
-	if e.moduleMetadata != nil {
-		// if we have module metadata we can parse all the modules as they'll be cached locally!
-		name := b.ModuleName()
-		for _, module := range e.moduleMetadata.Modules {
-			if module.Key == name {
-				modulePath = path.Clean(path.Join(e.projectRootPath, module.Dir))
-				break
-			}
+	moduleKey := b.ModuleKey()
+	for _, module := range e.moduleMetadata.Modules {
+		if module.Key == moduleKey {
+			modulePath = path.Clean(path.Join(e.projectRootPath, module.Dir))
+			break
 		}
 	}
 	if modulePath == "" {
-		return nil, fmt.Errorf("failed to load module from .terraform/modules")
-	}
-	if strings.HasPrefix(source, ".") {
-		source = ""
+		return nil, fmt.Errorf("resolve module with key %q from .terraform/modules", moduleKey)
 	}
 
-	if prefix, relativeDir, ok := strings.Cut(source, "//"); ok && !strings.HasSuffix(prefix, ":") && strings.Count(prefix, "/") == 2 {
-		if !strings.HasSuffix(modulePath, relativeDir) {
-			modulePath = fmt.Sprintf("%s/%s", modulePath, relativeDir)
-		}
+	if strings.HasPrefix(source, ".") {
+		source = ""
 	}
 
 	e.logger.Debug("Module resolved using modules.json",
@@ -118,8 +116,9 @@ func (e *evaluator) loadModuleFromTerraformCache(ctx context.Context, b *terrafo
 	)
 	moduleParser := e.parentParser.newModuleParser(e.filesystem, source, modulePath, b.Label(), b)
 	if err := moduleParser.ParseFS(ctx, modulePath); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse module filesystem: %w", err)
 	}
+
 	return &ModuleDefinition{
 		Name:       b.Label(),
 		Path:       modulePath,
@@ -142,7 +141,7 @@ func (e *evaluator) loadExternalModule(ctx context.Context, b *terraform.Block, 
 		WorkingDir:      e.projectRootPath,
 		Name:            b.FullName(),
 		ModulePath:      e.modulePath,
-		Logger:          log.WithPrefix("module resolver"),
+		Logger:          e.logger.With(log.Prefix("module resolver")),
 		AllowDownloads:  e.allowDownloads,
 		SkipCache:       e.skipCachedModules,
 	}

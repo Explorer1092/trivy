@@ -17,6 +17,7 @@ func TestParse(t *testing.T) {
 		file     string // Test input file
 		want     []ftypes.Package
 		wantDeps []ftypes.Dependency
+		wantErr  string
 	}{
 		{
 			name:     "Manifest v1.6",
@@ -60,6 +61,16 @@ func TestParse(t *testing.T) {
 			want:     juliaV10FormatPkgs,
 			wantDeps: juliaV10FormatDeps,
 		},
+		{
+			name:    "Manifest file doesn't contain child dependency of another dependency",
+			file:    "testdata/missed-child-dep/Manifest.toml",
+			wantErr: "has invalid format (parsed no deps)",
+		},
+		{
+			name:    "Manifest file contains multiple dependencies with same name",
+			file:    "testdata/multiple-same-deps/Manifest.toml",
+			wantErr: "has invalid format (parsed multiple deps)",
+		},
 	}
 
 	for _, tt := range tests {
@@ -67,7 +78,12 @@ func TestParse(t *testing.T) {
 			f, err := os.Open(tt.file)
 			require.NoError(t, err)
 
-			gotPkgs, gotDeps, err := NewParser().Parse(f)
+			gotPkgs, gotDeps, err := NewParser().Parse(t.Context(), f)
+
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
 			require.NoError(t, err)
 
 			sort.Sort(ftypes.Packages(tt.want))

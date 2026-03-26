@@ -7,11 +7,12 @@ import (
 	version "github.com/knqyf263/go-rpm-version"
 	"golang.org/x/xerrors"
 
+	"github.com/aquasecurity/trivy-db/pkg/db"
 	susecvrf "github.com/aquasecurity/trivy-db/pkg/vulnsrc/suse-cvrf"
 	osver "github.com/aquasecurity/trivy/pkg/detector/ospkg/version"
 	ftypes "github.com/aquasecurity/trivy/pkg/fanal/types"
 	"github.com/aquasecurity/trivy/pkg/log"
-	"github.com/aquasecurity/trivy/pkg/scanner/utils"
+	"github.com/aquasecurity/trivy/pkg/scan/utils"
 	"github.com/aquasecurity/trivy/pkg/types"
 )
 
@@ -40,9 +41,23 @@ var (
 		"15.3": time.Date(2022, 12, 31, 23, 59, 59, 0, time.UTC),
 		"15.4": time.Date(2023, 12, 31, 23, 59, 59, 0, time.UTC),
 		"15.5": time.Date(2024, 12, 31, 23, 59, 59, 0, time.UTC),
-		"15.6": time.Date(2031, 7, 31, 23, 59, 59, 0, time.UTC),
-		// 6 months after SLES 15 SP7 release
-		// "15.7": time.Date(2031, 7, 31, 23, 59, 59, 0, time.UTC),
+		"15.6": time.Date(2025, 12, 31, 23, 59, 59, 0, time.UTC),
+		"15.7": time.Date(2031, 7, 31, 23, 59, 59, 0, time.UTC),
+		"16.0": time.Date(2027, 11, 30, 23, 59, 59, 0, time.UTC),
+		"16.1": time.Date(2028, 11, 30, 23, 59, 59, 0, time.UTC),
+	}
+	slemicroEolDates = map[string]time.Time{
+		// Source: https://www.suse.com/lifecycle/
+		"5.0": time.Date(2022, 3, 31, 23, 59, 59, 0, time.UTC),
+		"5.1": time.Date(2025, 10, 31, 23, 59, 59, 0, time.UTC),
+		"5.2": time.Date(2026, 4, 30, 23, 59, 59, 0, time.UTC),
+		"5.3": time.Date(2026, 10, 30, 23, 59, 59, 0, time.UTC),
+		"5.4": time.Date(2027, 4, 30, 23, 59, 59, 0, time.UTC),
+		"5.5": time.Date(2027, 10, 31, 23, 59, 59, 0, time.UTC),
+		"6.0": time.Date(2028, 6, 30, 23, 59, 59, 0, time.UTC),
+		"6.1": time.Date(2028, 11, 30, 23, 59, 59, 0, time.UTC),
+		// 6.2 will be released late 2025
+		// "6.2": time.Date(2029, 11, 30, 23, 59, 59, 0, time.UTC),
 	}
 
 	opensuseEolDates = map[string]time.Time{
@@ -57,6 +72,7 @@ var (
 		"15.4": time.Date(2023, 11, 30, 23, 59, 59, 0, time.UTC),
 		"15.5": time.Date(2024, 12, 31, 23, 59, 59, 0, time.UTC),
 		"15.6": time.Date(2025, 12, 31, 23, 59, 59, 0, time.UTC),
+		"16.0": time.Date(2027, 10, 31, 23, 59, 59, 0, time.UTC),
 	}
 )
 
@@ -66,6 +82,8 @@ type Type int
 const (
 	// SUSEEnterpriseLinux is Linux Enterprise version
 	SUSEEnterpriseLinux Type = iota
+	// SUSE Linux Enterprise Micro is the micro series
+	SUSEEnterpriseLinuxMicro
 	// OpenSUSE for open versions
 	OpenSUSE
 	OpenSUSETumbleweed
@@ -82,6 +100,10 @@ func NewScanner(t Type) *Scanner {
 	case SUSEEnterpriseLinux:
 		return &Scanner{
 			vs: susecvrf.NewVulnSrc(susecvrf.SUSEEnterpriseLinux),
+		}
+	case SUSEEnterpriseLinuxMicro:
+		return &Scanner{
+			vs: susecvrf.NewVulnSrc(susecvrf.SUSEEnterpriseLinuxMicro),
 		}
 	case OpenSUSE:
 		return &Scanner{
@@ -102,7 +124,10 @@ func (s *Scanner) Detect(ctx context.Context, osVer string, _ *ftypes.Repository
 
 	var vulns []types.DetectedVulnerability
 	for _, pkg := range pkgs {
-		advisories, err := s.vs.Get(osVer, pkg.Name)
+		advisories, err := s.vs.Get(db.GetParams{
+			Release: osVer,
+			PkgName: pkg.Name,
+		})
 		if err != nil {
 			return nil, xerrors.Errorf("failed to get SUSE advisory: %w", err)
 		}
@@ -134,6 +159,9 @@ func (s *Scanner) Detect(ctx context.Context, osVer string, _ *ftypes.Repository
 func (s *Scanner) IsSupportedVersion(ctx context.Context, osFamily ftypes.OSType, osVer string) bool {
 	if osFamily == ftypes.SLES {
 		return osver.Supported(ctx, slesEolDates, osFamily, osVer)
+	}
+	if osFamily == ftypes.SLEMicro {
+		return osver.Supported(ctx, slemicroEolDates, osFamily, osVer)
 	}
 	// tumbleweed is a rolling release, it has no version and no eol
 	if osFamily == ftypes.OpenSUSETumbleweed {

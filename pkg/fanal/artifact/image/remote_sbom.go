@@ -21,6 +21,7 @@ import (
 	"github.com/aquasecurity/trivy/pkg/oci"
 	"github.com/aquasecurity/trivy/pkg/remote"
 	"github.com/aquasecurity/trivy/pkg/types"
+	xos "github.com/aquasecurity/trivy/pkg/x/os"
 )
 
 var errNoSBOMFound = xerrors.New("remote SBOM not found")
@@ -87,26 +88,26 @@ func (a Artifact) inspectOCIReferrerSBOM(ctx context.Context) (artifact.Referenc
 func (a Artifact) parseReferrer(ctx context.Context, repo string, desc v1.Descriptor) (artifact.Reference, error) {
 	const fileName string = "referrer.sbom"
 	repoName := fmt.Sprintf("%s@%s", repo, desc.Digest)
-	referrer, err := oci.NewArtifact(repoName, true, a.artifactOption.ImageOption.RegistryOptions)
-	if err != nil {
-		return artifact.Reference{}, xerrors.Errorf("OCI error: %w", err)
-	}
 
-	tmpDir, err := os.MkdirTemp("", "trivy-sbom-*")
+	tmpDir, err := xos.MkdirTemp("", "sbom-referrer-")
 	if err != nil {
-		return artifact.Reference{}, xerrors.Errorf("mkdir temp error: %w", err)
+		return artifact.Reference{}, xerrors.Errorf("failed to create temp directory: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
 	// Download SBOM to local filesystem
+	referrer := oci.NewArtifact(repoName, a.artifactOption.ImageOption.RegistryOptions)
 	if err = referrer.Download(ctx, tmpDir, oci.DownloadOption{
 		MediaType: desc.ArtifactType,
 		Filename:  fileName,
+		Quiet:     true,
 	}); err != nil {
 		return artifact.Reference{}, xerrors.Errorf("SBOM download error: %w", err)
 	}
 
-	res, err := a.inspectSBOMFile(ctx, filepath.Join(tmpDir, fileName))
+	filePath := filepath.Join(tmpDir, fileName)
+
+	res, err := a.inspectSBOMFile(ctx, filePath)
 	if err != nil {
 		return res, xerrors.Errorf("SBOM error: %w", err)
 	}
@@ -135,7 +136,7 @@ func (a Artifact) inspectRekorSBOMAttestation(ctx context.Context) (artifact.Ref
 		return artifact.Reference{}, xerrors.Errorf("failed to retrieve SBOM attestation: %w", err)
 	}
 
-	f, err := os.CreateTemp("", "sbom-*")
+	f, err := xos.CreateTemp("", "sbom-attestation-")
 	if err != nil {
 		return artifact.Reference{}, xerrors.Errorf("failed to create a temporary file: %w", err)
 	}

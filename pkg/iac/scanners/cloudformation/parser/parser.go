@@ -2,19 +2,19 @@ package parser
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"path"
 	"path/filepath"
 	"strings"
 
-	"github.com/liamg/jfather"
+	"github.com/hashicorp/go-multierror"
 	"gopkg.in/yaml.v3"
 
 	"github.com/aquasecurity/trivy/pkg/iac/ignore"
 	"github.com/aquasecurity/trivy/pkg/log"
+	xjson "github.com/aquasecurity/trivy/pkg/x/json"
 )
 
 type Parser struct {
@@ -83,7 +83,7 @@ func (p *Parser) ParseFS(ctx context.Context, fsys fs.FS, dir string) (FileConte
 	return contexts, nil
 }
 
-func (p *Parser) ParseFile(ctx context.Context, fsys fs.FS, path string) (fctx *FileContext, err error) {
+func (p *Parser) ParseFile(ctx context.Context, fsys fs.FS, filePath string) (fctx *FileContext, err error) {
 	defer func() {
 		if e := recover(); e != nil {
 			err = fmt.Errorf("panic during parse: %s", e)
@@ -105,15 +105,15 @@ func (p *Parser) ParseFile(ctx context.Context, fsys fs.FS, path string) (fctx *
 	}
 
 	sourceFmt := YamlSourceFormat
-	if strings.HasSuffix(strings.ToLower(path), ".json") {
+	if path.Ext(filePath) == ".json" {
 		sourceFmt = JsonSourceFormat
 	}
 
-	f, err := fsys.Open(filepath.ToSlash(path))
+	f, err := fsys.Open(filePath)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = f.Close() }()
+	defer f.Close()
 
 	content, err := io.ReadAll(f)
 	if err != nil {
@@ -123,7 +123,7 @@ func (p *Parser) ParseFile(ctx context.Context, fsys fs.FS, path string) (fctx *
 	lines := strings.Split(string(content), "\n")
 
 	fctx = &FileContext{
-		filepath:     path,
+		filepath:     filePath,
 		lines:        lines,
 		SourceFormat: sourceFmt,
 	}
@@ -131,26 +131,28 @@ func (p *Parser) ParseFile(ctx context.Context, fsys fs.FS, path string) (fctx *
 	switch sourceFmt {
 	case YamlSourceFormat:
 		if err := yaml.Unmarshal(content, fctx); err != nil {
-			return nil, NewErrInvalidContent(path, err)
+			return nil, NewErrInvalidContent(filePath, err)
 		}
-		fctx.Ignores = ignore.Parse(string(content), path, "")
+		fctx.Ignores = ignore.Parse(string(content), filePath, "")
 	case JsonSourceFormat:
-		if err := jfather.Unmarshal(content, fctx); err != nil {
-			return nil, NewErrInvalidContent(path, err)
+		if err := xjson.Unmarshal(content, fctx); err != nil {
+			return nil, NewErrInvalidContent(filePath, err)
 		}
 	}
+
+	fctx.stripNullProperties()
 
 	fctx.overrideParameters(p.overridedParameters)
 
 	if params := fctx.missingParameterValues(); len(params) > 0 {
-		p.logger.Warn("Missing parameter values", log.FilePath(path), log.String("parameters", strings.Join(params, ", ")))
+		p.logger.Warn("Missing parameter values", log.FilePath(filePath), log.String("parameters", strings.Join(params, ", ")))
 	}
 
 	fctx.lines = lines
 	fctx.SourceFormat = sourceFmt
-	fctx.filepath = path
+	fctx.filepath = filePath
 
-	p.logger.Debug("Context loaded from source", log.FilePath(path))
+	p.logger.Debug("Context loaded from source", log.FilePath(filePath))
 
 	// the context must be set to conditions before resources
 	for _, c := range fctx.Conditions {
@@ -158,7 +160,11 @@ func (p *Parser) ParseFile(ctx context.Context, fsys fs.FS, path string) (fctx *
 	}
 
 	for name, r := range fctx.Resources {
-		r.configureResource(name, fsys, path, fctx)
+		r.configureResource(name, fsys, filePath, fctx)
+	}
+
+	if err := fctx.expandTransforms(); err != nil {
+		return nil, err
 	}
 
 	return fctx, nil
@@ -171,35 +177,28 @@ func (p *Parser) parseParams() error {
 
 	params := make(Parameters)
 
-	var errs []error
-
+	var errs error
 	for _, path := range p.parameterFiles {
-		if parameters, err := p.parseParametersFile(path); err != nil {
-			errs = append(errs, err)
+		f, err := p.configsFS.Open(path)
+		if err != nil {
+			errs = multierror.Append(errs, fmt.Errorf("open file: %w", err))
+			continue
+		}
+
+		if parameters, err := ParseParameters(f); err != nil {
+			errs = multierror.Append(errs, err)
 		} else {
 			params.Merge(parameters)
 		}
+		_ = f.Close()
 	}
 
-	if len(errs) != 0 {
-		return errors.Join(errs...)
+	if errs != nil {
+		return errs
 	}
 
 	params.Merge(p.parameters)
 
 	p.overridedParameters = params
 	return nil
-}
-
-func (p *Parser) parseParametersFile(path string) (Parameters, error) {
-	f, err := p.configsFS.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("parameters file %q open error: %w", path, err)
-	}
-
-	var parameters Parameters
-	if err := json.NewDecoder(f).Decode(&parameters); err != nil {
-		return nil, err
-	}
-	return parameters, nil
 }

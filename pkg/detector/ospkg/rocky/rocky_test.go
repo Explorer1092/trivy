@@ -1,7 +1,6 @@
 package rocky_test
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -71,7 +70,7 @@ func TestScanner_Detect(t *testing.T) {
 			},
 		},
 		{
-			name: "skip modular package",
+			name: "modular package",
 			fixtures: []string{
 				"testdata/fixtures/modular.yaml",
 				"testdata/fixtures/data-source.yaml",
@@ -95,7 +94,20 @@ func TestScanner_Detect(t *testing.T) {
 					},
 				},
 			},
-			want: nil,
+			want: []types.DetectedVulnerability{
+				{
+					PkgName:          "nginx",
+					VulnerabilityID:  "CVE-2021-23017",
+					InstalledVersion: "1:1.16.1-2.module+el8.4.0+543+efbf198b.0",
+					FixedVersion:     "1:1.16.1-2.module+el8.4.0+543+efbf198b.1",
+					Layer:            ftypes.Layer{},
+					DataSource: &dbTypes.DataSource{
+						ID:   vulnerability.Rocky,
+						Name: "Rocky Linux updateinfo",
+						URL:  "https://download.rockylinux.org/pub/rocky/",
+					},
+				},
+			},
 		},
 		{
 			name: "Get returns an error",
@@ -123,10 +135,9 @@ func TestScanner_Detect(t *testing.T) {
 			defer db.Close()
 
 			s := rocky.NewScanner()
-			got, err := s.Detect(nil, tt.args.osVer, nil, tt.args.pkgs)
+			got, err := s.Detect(t.Context(), tt.args.osVer, nil, tt.args.pkgs)
 			if tt.wantErr != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.wantErr)
+				require.ErrorContains(t, err, tt.wantErr)
 				return
 			}
 			require.NoError(t, err)
@@ -176,7 +187,7 @@ func TestScanner_IsSupportedVersion(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := clock.With(context.Background(), tt.now)
+			ctx := clock.With(t.Context(), tt.now)
 			s := rocky.NewScanner()
 			got := s.IsSupportedVersion(ctx, tt.args.osFamily, tt.args.osVer)
 			assert.Equal(t, tt.want, got)

@@ -2,7 +2,6 @@ package clean
 
 import (
 	"context"
-	"os"
 
 	"golang.org/x/xerrors"
 
@@ -25,7 +24,11 @@ func Run(ctx context.Context, opts flag.Options) error {
 	}
 
 	if opts.CleanAll {
-		return cleanAll(ctx, opts)
+		opts.CleanScanCache = true
+		opts.CleanVulnerabilityDB = true
+		opts.CleanJavaDB = true
+		opts.CleanChecksBundle = true
+		opts.CleanVEXRepositories = true
 	}
 
 	if opts.CleanScanCache {
@@ -60,14 +63,6 @@ func Run(ctx context.Context, opts flag.Options) error {
 	return nil
 }
 
-func cleanAll(ctx context.Context, opts flag.Options) error {
-	log.InfoContext(ctx, "Removing all caches...")
-	if err := os.RemoveAll(opts.CacheDir); err != nil {
-		return xerrors.Errorf("failed to remove the directory (%s) : %w", opts.CacheDir, err)
-	}
-	return nil
-}
-
 func cleanScanCache(ctx context.Context, opts flag.Options) error {
 	log.InfoContext(ctx, "Removing scan cache...")
 	c, cleanup, err := cache.New(opts.CacheOpts())
@@ -76,7 +71,7 @@ func cleanScanCache(ctx context.Context, opts flag.Options) error {
 	}
 	defer cleanup()
 
-	if err = c.Clear(); err != nil {
+	if err = c.Clear(ctx); err != nil {
 		return xerrors.Errorf("clear scan cache: %w", err)
 	}
 	return nil

@@ -1,7 +1,6 @@
 package rpm
 
 import (
-	"context"
 	"errors"
 	"os"
 	"strings"
@@ -56,7 +55,7 @@ func Test_rpmPkgAnalyzer_Analyze(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			a := rpmPkgAnalyzer{}
-			got, err := a.Analyze(context.Background(), tt.input)
+			got, err := a.Analyze(t.Context(), tt.input)
 			if tt.wantErr != "" {
 				assert.ErrorContains(t, err, tt.wantErr)
 				return
@@ -159,6 +158,7 @@ func Test_rpmPkgAnalyzer_listPkgs(t *testing.T) {
 					SrcVersion: "2.17",
 					SrcRelease: "317.el7",
 					Maintainer: "Red Hat",
+					Repository: types.PackageRepository{Class: types.RepositoryClassOfficial},
 					InstalledFiles: []string{
 						"/etc/ld.so.conf",
 						"/etc/rpc",
@@ -217,6 +217,7 @@ func Test_rpmPkgAnalyzer_listPkgs(t *testing.T) {
 					SrcName:    "curl",
 					SrcVersion: "8.3.0",
 					SrcRelease: "1.amzn2023.0.2",
+					Repository: types.PackageRepository{Class: types.RepositoryClassOfficial},
 					InstalledFiles: []string{
 						"/usr/bin/curl",
 						"/usr/lib/.build-id",
@@ -249,11 +250,12 @@ func Test_rpmPkgAnalyzer_listPkgs(t *testing.T) {
 			},
 			wantPkgs: types.Packages{
 				{
-					ID:      "glibc@2.17-307.el7.1.x86_64",
-					Name:    "glibc",
-					Version: "2.17",
-					Release: "307.el7.1",
-					Arch:    "x86_64",
+					ID:         "glibc@2.17-307.el7.1.x86_64",
+					Name:       "glibc",
+					Version:    "2.17",
+					Release:    "307.el7.1",
+					Arch:       "x86_64",
+					Repository: types.PackageRepository{Class: types.RepositoryClassThirdParty},
 				},
 			},
 		},
@@ -273,7 +275,7 @@ func Test_rpmPkgAnalyzer_listPkgs(t *testing.T) {
 			}
 
 			a := newRPMPkgAnalyzer()
-			gotPkgs, gotFiles, err := a.listPkgs(context.Background(), m)
+			gotPkgs, gotFiles, err := a.listPkgs(t.Context(), m)
 			if tt.wantErr != "" {
 				assert.ErrorContains(t, err, tt.wantErr)
 				return

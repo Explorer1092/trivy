@@ -1,23 +1,25 @@
 package npm
 
 import (
+	"context"
 	"fmt"
-	"io"
 	"maps"
 	"path"
 	"slices"
 	"sort"
 	"strings"
 
-	"github.com/liamg/jfather"
 	"github.com/samber/lo"
 	"golang.org/x/xerrors"
 
 	"github.com/aquasecurity/trivy/pkg/dependency"
+	"github.com/aquasecurity/trivy/pkg/dependency/parser/nodejs/packagejson"
 	"github.com/aquasecurity/trivy/pkg/dependency/parser/utils"
 	ftypes "github.com/aquasecurity/trivy/pkg/fanal/types"
 	"github.com/aquasecurity/trivy/pkg/log"
+	"github.com/aquasecurity/trivy/pkg/set"
 	xio "github.com/aquasecurity/trivy/pkg/x/io"
+	xjson "github.com/aquasecurity/trivy/pkg/x/json"
 )
 
 const nodeModulesDir = "node_modules"
@@ -33,22 +35,22 @@ type Dependency struct {
 	Dependencies map[string]Dependency `json:"dependencies"`
 	Requires     map[string]string     `json:"requires"`
 	Resolved     string                `json:"resolved"`
-	StartLine    int
-	EndLine      int
+	xjson.Location
 }
 
 type Package struct {
 	Name                 string            `json:"name"`
 	Version              string            `json:"version"`
+	License              string            `json:"license"`
 	Dependencies         map[string]string `json:"dependencies"`
 	OptionalDependencies map[string]string `json:"optionalDependencies"`
 	DevDependencies      map[string]string `json:"devDependencies"`
+	PeerDependencies     map[string]string `json:"peerDependencies"`
 	Resolved             string            `json:"resolved"`
 	Dev                  bool              `json:"dev"`
 	Link                 bool              `json:"link"`
-	Workspaces           []string          `json:"workspaces"`
-	StartLine            int
-	EndLine              int
+	Workspaces           any               `json:"workspaces"`
+	xjson.Location
 }
 
 type Parser struct {
@@ -61,13 +63,9 @@ func NewParser() *Parser {
 	}
 }
 
-func (p *Parser) Parse(r xio.ReadSeekerAt) ([]ftypes.Package, []ftypes.Dependency, error) {
+func (p *Parser) Parse(_ context.Context, r xio.ReadSeekerAt) ([]ftypes.Package, []ftypes.Dependency, error) {
 	var lockFile LockFile
-	input, err := io.ReadAll(r)
-	if err != nil {
-		return nil, nil, xerrors.Errorf("read error: %w", err)
-	}
-	if err := jfather.Unmarshal(input, &lockFile); err != nil {
+	if err := xjson.UnmarshalRead(r, &lockFile); err != nil {
 		return nil, nil, xerrors.Errorf("decode error: %w", err)
 	}
 
@@ -90,8 +88,8 @@ func (p *Parser) parseV2(packages map[string]Package) ([]ftypes.Package, []ftype
 	// https://docs.npmjs.com/cli/v9/configuring-npm/package-lock-json#packages
 	p.resolveLinks(packages)
 
-	directDeps := make(map[string]struct{})
-	for name, version := range lo.Assign(packages[""].Dependencies, packages[""].OptionalDependencies, packages[""].DevDependencies) {
+	directDeps := set.New[string]()
+	for name, version := range lo.Assign(packages[""].Dependencies, packages[""].OptionalDependencies, packages[""].DevDependencies, packages[""].PeerDependencies) {
 		pkgPath := joinPaths(nodeModulesDir, name)
 		if _, ok := packages[pkgPath]; !ok {
 			p.logger.Debug("Unable to find the direct dependency",
@@ -100,7 +98,7 @@ func (p *Parser) parseV2(packages map[string]Package) ([]ftypes.Package, []ftype
 		}
 		// Store the package paths of direct dependencies
 		// e.g. node_modules/body-parser
-		directDeps[pkgPath] = struct{}{}
+		directDeps.Append(pkgPath)
 	}
 
 	for pkgPath, pkg := range packages {
@@ -115,10 +113,6 @@ func (p *Parser) parseV2(packages map[string]Package) ([]ftypes.Package, []ftype
 		}
 
 		pkgID := packageID(pkgName, pkg.Version)
-		location := ftypes.Location{
-			StartLine: pkg.StartLine,
-			EndLine:   pkg.EndLine,
-		}
 
 		var ref ftypes.ExternalRef
 		if pkg.Resolved != "" {
@@ -143,21 +137,32 @@ func (p *Parser) parseV2(packages map[string]Package) ([]ftypes.Package, []ftype
 				sortExternalReferences(savedPkg.ExternalReferences)
 			}
 
-			savedPkg.Locations = append(savedPkg.Locations, location)
+			savedPkg.Locations = append(savedPkg.Locations, ftypes.Location(pkg.Location))
 			sort.Sort(savedPkg.Locations)
+
+			// If for some reason license is missing in savedPkg, but exists in the current pkg, add it.
+			if len(savedPkg.Licenses) == 0 && pkg.License != "" {
+				savedPkg.Licenses = []string{pkg.License}
+			}
 
 			pkgs[pkgID] = savedPkg
 			continue
+		}
+
+		var licenses []string
+		if pkg.License != "" {
+			licenses = []string{pkg.License}
 		}
 
 		newPkg := ftypes.Package{
 			ID:                 pkgID,
 			Name:               pkgName,
 			Version:            pkg.Version,
+			Licenses:           licenses,
 			Relationship:       lo.Ternary(pkgIndirect, ftypes.RelationshipIndirect, ftypes.RelationshipDirect),
 			Dev:                pkg.Dev,
 			ExternalReferences: lo.Ternary(ref.URL != "", []ftypes.ExternalRef{ref}, nil),
-			Locations:          []ftypes.Location{location},
+			Locations:          []ftypes.Location{ftypes.Location(pkg.Location)},
 		}
 		pkgs[pkgID] = newPkg
 
@@ -165,7 +170,7 @@ func (p *Parser) parseV2(packages map[string]Package) ([]ftypes.Package, []ftype
 		// └─┬ watchpack@1.7.5
 		// ├─┬ chokidar@3.5.3 - optional dependency
 		// │ └── glob-parent@5.1.
-		dependencies := lo.Assign(pkg.Dependencies, pkg.OptionalDependencies)
+		dependencies := lo.Assign(pkg.Dependencies, pkg.OptionalDependencies, pkg.PeerDependencies)
 		dependsOn := make([]string, 0, len(dependencies))
 		for depName, depVersion := range dependencies {
 			depID, err := findDependsOn(pkgPath, depName, packages)
@@ -215,7 +220,7 @@ func (p *Parser) resolveLinks(packages map[string]Package) {
 		rootPkg.Dependencies = make(map[string]string)
 	}
 
-	workspaces := rootPkg.Workspaces
+	workspaces := packagejson.ParseWorkspaces(rootPkg.Workspaces)
 	// Changing the map during the map iteration causes unexpected behavior,
 	// so we need to iterate over the cloned `packages` map, but change the original `packages` map.
 	for pkgPath, pkg := range maps.Clone(packages) {
@@ -302,12 +307,7 @@ func (p *Parser) parseV1(dependencies map[string]Dependency, versions map[string
 					URL:  dep.Resolved,
 				},
 			},
-			Locations: []ftypes.Location{
-				{
-					StartLine: dep.StartLine,
-					EndLine:   dep.EndLine,
-				},
-			},
+			Locations: []ftypes.Location{ftypes.Location(dep.Location)},
 		}
 		pkgs = append(pkgs, pkg)
 
@@ -357,7 +357,15 @@ func (p *Parser) pkgNameFromPath(pkgPath string) string {
 	// node_modules/function1
 	// node_modules/nested_func/node_modules/debug
 	if index := strings.LastIndex(pkgPath, nodeModulesDir); index != -1 {
-		return pkgPath[index+len(nodeModulesDir)+1:]
+		pkgName := pkgPath[index+len(nodeModulesDir):]
+		pkgName = strings.TrimPrefix(pkgName, "/")
+
+		if pkgName == "" {
+			p.logger.Warn("Invalid package-lock.json file. Package path doesn't have package name suffix", log.String("pkg_path", pkgPath))
+			return ""
+		}
+
+		return pkgName
 	}
 	p.logger.Warn("Package path doesn't have `node_modules` prefix", log.String("pkg_path", pkgPath))
 	return pkgPath
@@ -365,13 +373,13 @@ func (p *Parser) pkgNameFromPath(pkgPath string) string {
 
 func uniqueDeps(deps []ftypes.Dependency) []ftypes.Dependency {
 	var uniqDeps ftypes.Dependencies
-	unique := make(map[string]struct{})
+	unique := set.New[string]()
 
 	for _, dep := range deps {
 		sort.Strings(dep.DependsOn)
 		depKey := fmt.Sprintf("%s:%s", dep.ID, strings.Join(dep.DependsOn, ","))
-		if _, ok := unique[depKey]; !ok {
-			unique[depKey] = struct{}{}
+		if !unique.Contains(depKey) {
+			unique.Append(depKey)
 			uniqDeps = append(uniqDeps, dep)
 		}
 	}
@@ -380,11 +388,11 @@ func uniqueDeps(deps []ftypes.Dependency) []ftypes.Dependency {
 	return uniqDeps
 }
 
-func isIndirectPkg(pkgPath string, directDeps map[string]struct{}) bool {
+func isIndirectPkg(pkgPath string, directDeps set.Set[string]) bool {
 	// A project can contain 2 different versions of the same dependency.
 	// e.g. `node_modules/string-width/node_modules/strip-ansi` and `node_modules/string-ansi`
 	// direct dependencies always have root path (`node_modules/<pkg_name>`)
-	if _, ok := directDeps[pkgPath]; ok {
+	if directDeps.Contains(pkgPath) {
 		return false
 	}
 	return true
@@ -392,28 +400,6 @@ func isIndirectPkg(pkgPath string, directDeps map[string]struct{}) bool {
 
 func joinPaths(paths ...string) string {
 	return strings.Join(paths, "/")
-}
-
-// UnmarshalJSONWithMetadata needed to detect start and end lines of deps for v1
-func (t *Dependency) UnmarshalJSONWithMetadata(node jfather.Node) error {
-	if err := node.Decode(&t); err != nil {
-		return err
-	}
-	// Decode func will overwrite line numbers if we save them first
-	t.StartLine = node.Range().Start.Line
-	t.EndLine = node.Range().End.Line
-	return nil
-}
-
-// UnmarshalJSONWithMetadata needed to detect start and end lines of deps for v2 or newer
-func (t *Package) UnmarshalJSONWithMetadata(node jfather.Node) error {
-	if err := node.Decode(&t); err != nil {
-		return err
-	}
-	// Decode func will overwrite line numbers if we save them first
-	t.StartLine = node.Range().Start.Line
-	t.EndLine = node.Range().End.Line
-	return nil
 }
 
 func packageID(name, version string) string {

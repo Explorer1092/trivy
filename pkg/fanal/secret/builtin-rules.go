@@ -3,10 +3,9 @@ package secret
 import (
 	"fmt"
 
-	"github.com/samber/lo"
-
 	"github.com/aquasecurity/trivy/pkg/fanal/types"
 	iacRules "github.com/aquasecurity/trivy/pkg/iac/rules"
+	xslices "github.com/aquasecurity/trivy/pkg/x/slices"
 )
 
 var (
@@ -59,6 +58,7 @@ var (
 	CategoryNewRelic             = types.SecretRuleCategory("NewRelic")
 	CategoryNpm                  = types.SecretRuleCategory("Npm")
 	CategoryPlanetscale          = types.SecretRuleCategory("Planetscale")
+	CategoryPrivatePackagist     = types.SecretRuleCategory("Private Packagist")
 	CategoryPostman              = types.SecretRuleCategory("Postman")
 	CategoryPulumi               = types.SecretRuleCategory("Pulumi")
 	CategoryRubyGems             = types.SecretRuleCategory("RubyGems")
@@ -70,6 +70,7 @@ var (
 	CategoryTypeform             = types.SecretRuleCategory("Typeform")
 	CategoryDocker               = types.SecretRuleCategory("Docker")
 	CategoryHuggingFace          = types.SecretRuleCategory("HuggingFace")
+	CategorySymfony              = types.SecretRuleCategory("Symfony")
 )
 
 // Reusable regex patterns
@@ -77,7 +78,8 @@ const (
 	quote     = `["']?`
 	connect   = `\s*(:|=>|=)?\s*`
 	endSecret = `[.,]?(\s+|$)`
-	startWord = "([^0-9a-zA-Z]|^)"
+	startWord = "([^0-9a-zA-Z_]|^)"
+	endWord   = "([^0-9a-zA-Z_]|$)"
 
 	aws = `aws_?`
 )
@@ -89,7 +91,7 @@ func GetBuiltinRules() []Rule {
 
 // This function is exported for trivy-plugin-aqua purposes only
 func GetSecretRulesMetadata() []iacRules.Check {
-	return lo.Map(builtinRules, func(rule Rule, i int) iacRules.Check {
+	return xslices.Map(builtinRules, func(rule Rule) iacRules.Check {
 		return iacRules.Check{
 			Name:        rule.ID,
 			Description: rule.Title,
@@ -175,7 +177,7 @@ var builtinRules = []Rule{
 		Category:        CategoryHuggingFace,
 		Severity:        "CRITICAL",
 		Title:           "Hugging Face Access Token",
-		Regex:           MustCompileWithoutWordPrefix(`?P<secret>hf_[A-Za-z0-9]{34,40}`),
+		Regex:           MustCompileWithBoundaries(`?P<secret>hf_[A-Za-z0-9]{34,40}`),
 		SecretGroupName: "secret",
 		Keywords:        []string{"hf_"},
 	},
@@ -184,7 +186,7 @@ var builtinRules = []Rule{
 		Category:        CategoryAsymmetricPrivateKey,
 		Title:           "Asymmetric Private Key",
 		Severity:        "HIGH",
-		Regex:           MustCompile(`(?i)-----\s*?BEGIN[ A-Z0-9_-]*?PRIVATE KEY( BLOCK)?\s*?-----[\s]*?(?P<secret>[A-Za-z0-9=+/\\\r\n][A-Za-z0-9=+/\\\s]+)[\s]*?-----\s*?END[ A-Z0-9_-]*? PRIVATE KEY( BLOCK)?\s*?-----`),
+		Regex:           MustCompile(`(?i)-----\s*?BEGIN[ A-Z0-9_-]*?PRIVATE KEY( BLOCK)?\s*?-----[\s]*?(?P<secret>[A-Za-z0-9=+/\\][A-Za-z0-9=+/\\\s]{30,}[A-Za-z0-9=+/\\])[\s]*?-----\s*?END[ A-Z0-9_-]*? PRIVATE KEY( BLOCK)?\s*?-----`),
 		SecretGroupName: "secret",
 		Keywords:        []string{"-----"},
 	},
@@ -553,7 +555,7 @@ var builtinRules = []Rule{
 		Category: CategoryGrafana,
 		Title:    "Grafana API token",
 		Severity: "MEDIUM",
-		Regex:    MustCompile(`['\"]eyJrIjoi(?i)[a-z0-9\-_=]{72,92}['\"]`),
+		Regex:    MustCompile(`['\"]?eyJrIjoi(?i)[a-z0-9\-_=]{72,92}['\"]?`),
 		Keywords: []string{"eyJrIjoi"},
 	},
 	{
@@ -744,6 +746,15 @@ var builtinRules = []Rule{
 		Keywords: []string{"pscale_tkn_"},
 	},
 	{
+		ID:       "private-packagist-token",
+		Category: CategoryPrivatePackagist,
+		Title:    "Private Packagist token",
+		Severity: "HIGH",
+		// https://packagist.com/docs/composer-authentication#token-format
+		Regex:    MustCompile(`packagist_[ou][ru]t_(?i)[a-f0-9]{68}`),
+		Keywords: []string{"packagist_uut_", "packagist_ort_", "packagist_out_"},
+	},
+	{
 		ID:       "postman-api-token",
 		Category: CategoryPostman,
 		Title:    "Postman API token",
@@ -835,5 +846,13 @@ var builtinRules = []Rule{
 		Regex:           MustCompile(`(?i)(\.(dockerconfigjson|dockercfg):\s*\|*\s*(?P<secret>(ey|ew)+[A-Za-z0-9\/\+=]+))`),
 		SecretGroupName: "secret",
 		Keywords:        []string{"dockerc"},
+	},
+	{
+		ID:       "symfony-default-secret",
+		Category: CategorySymfony,
+		Title:    "Symfony Default Secret",
+		Severity: "HIGH",
+		Regex:    MustCompile(`ThisTokenIsNotSoSecretChangeIt|ThisEzPlatformTokenIsNotSoSecret_PleaseChangeIt`),
+		Keywords: []string{"TokenIsNotSoSecret"},
 	},
 }

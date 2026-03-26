@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,9 +35,22 @@ type Index struct {
 
 func (m *Manager) Update(ctx context.Context, opts Options) error {
 	m.logger.InfoContext(ctx, "Updating the plugin index...", log.String("url", m.indexURL))
-	if _, err := downloader.Download(ctx, m.indexURL, filepath.Dir(m.indexPath), "",
-		downloader.Options{Insecure: opts.Insecure}); err != nil {
+
+	// Download the index file to a temporary directory and copy it to the plugins directory,
+	// to avoid removing installed plugins.
+	tempDir, err := downloader.DownloadToTempDir(ctx, m.indexURL, downloader.Options{Insecure: opts.Insecure})
+	if err != nil {
 		return xerrors.Errorf("unable to download the plugin index: %w", err)
+	}
+
+	err = os.MkdirAll(filepath.Dir(m.indexPath), fs.ModePerm)
+	if err != nil {
+		return xerrors.Errorf("failed to create plugin index dir: %w", err)
+	}
+
+	_, err = fsutils.CopyFile(filepath.Join(tempDir, "index.yaml"), m.indexPath)
+	if err != nil {
+		return xerrors.Errorf("unable to copy the plugin index file: %w", err)
 	}
 	return nil
 }
@@ -51,7 +65,7 @@ func (m *Manager) Search(ctx context.Context, keyword string) error {
 	}
 
 	var buf bytes.Buffer
-	buf.WriteString(fmt.Sprintf("%-20s %-60s %-20s %s\n", "NAME", "DESCRIPTION", "MAINTAINER", "OUTPUT"))
+	fmt.Fprintf(&buf, "%-20s %-60s %-20s %s\n", "NAME", "DESCRIPTION", "MAINTAINER", "OUTPUT")
 	for _, p := range index.Plugins {
 		if keyword == "" || strings.Contains(p.Name, keyword) || strings.Contains(p.Summary, keyword) {
 			s := fmt.Sprintf("%-20s %-60s %-20s %s\n", truncateString(p.Name, 20),
@@ -61,7 +75,7 @@ func (m *Manager) Search(ctx context.Context, keyword string) error {
 		}
 	}
 
-	if _, err = fmt.Fprintf(m.w, buf.String()); err != nil {
+	if _, err = fmt.Fprint(m.w, buf.String()); err != nil {
 		return err
 	}
 

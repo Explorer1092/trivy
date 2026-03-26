@@ -8,7 +8,7 @@ This tutorial details how to
 #### Prerequisites
 
 1. [Trivy CLI](../../getting-started/installation.md) installed
-2. [Cosign CLI](https://docs.sigstore.dev/system_config/installation/) installed 
+2. [Cosign CLI](https://docs.sigstore.dev/cosign/system_config/installation/) installed
 3. Ensure that you have access to a container image in a remote container registry that you own/within your account. In this tutorial, we will use DockerHub.
 
 ## Scan Container Image for vulnerabilities
@@ -142,4 +142,4 @@ The following checks were performed on each of these signatures:
 
 See [here][vuln-attestation] for more details.
 
-[vuln-attestation]: ../../docs/supply-chain/attestation/vuln.md
+[vuln-attestation]: ../../guide/supply-chain/attestation/vuln.md

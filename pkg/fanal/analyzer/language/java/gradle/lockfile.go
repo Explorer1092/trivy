@@ -18,6 +18,7 @@ import (
 	"github.com/aquasecurity/trivy/pkg/fanal/types"
 	"github.com/aquasecurity/trivy/pkg/log"
 	"github.com/aquasecurity/trivy/pkg/utils/fsutils"
+	xslices "github.com/aquasecurity/trivy/pkg/x/slices"
 )
 
 func init() {
@@ -42,20 +43,21 @@ func newGradleLockAnalyzer(_ analyzer.AnalyzerOptions) (analyzer.PostAnalyzer, e
 	}, nil
 }
 
-func (a gradleLockAnalyzer) PostAnalyze(_ context.Context, input analyzer.PostAnalysisInput) (*analyzer.AnalysisResult, error) {
+func (a gradleLockAnalyzer) PostAnalyze(ctx context.Context, input analyzer.PostAnalysisInput) (*analyzer.AnalysisResult, error) {
 	poms, err := a.parsePoms()
 	if err != nil {
 		a.logger.Warn("Unable to get licenses and dependencies", log.Err(err))
 	}
 
-	required := func(path string, d fs.DirEntry) bool {
-		return a.Required(path, nil)
+	required := func(_ string, _ fs.DirEntry) bool {
+		// Parse all required files: `*gradle.lockfile` (from a.Required func) + input.FilePatterns.Match()
+		return true
 	}
 
 	var apps []types.Application
 	err = fsutils.WalkDir(input.FS, ".", required, func(filePath string, _ fs.DirEntry, r io.Reader) error {
 		var app *types.Application
-		app, err = language.Parse(types.Gradle, filePath, r, a.parser)
+		app, err = language.Parse(ctx, types.Gradle, filePath, r, a.parser)
 		if err != nil {
 			return xerrors.Errorf("%s parse error: %w", filePath, err)
 		}
@@ -73,7 +75,7 @@ func (a gradleLockAnalyzer) PostAnalyze(_ context.Context, input analyzer.PostAn
 
 			// Fill licenses from pom file
 			if len(pom.Licenses.License) > 0 {
-				app.Packages[i].Licenses = lo.Map(pom.Licenses.License, func(license License, _ int) string {
+				app.Packages[i].Licenses = xslices.Map(pom.Licenses.License, func(license License) string {
 					return license.Name
 				})
 			}

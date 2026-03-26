@@ -2,6 +2,7 @@ package bundler
 
 import (
 	"bufio"
+	"context"
 	"sort"
 	"strings"
 
@@ -19,7 +20,7 @@ func NewParser() *Parser {
 	return &Parser{}
 }
 
-func (p *Parser) Parse(r xio.ReadSeekerAt) ([]ftypes.Package, []ftypes.Dependency, error) {
+func (p *Parser) Parse(_ context.Context, r xio.ReadSeekerAt) ([]ftypes.Package, []ftypes.Dependency, error) {
 	pkgs := make(map[string]ftypes.Package)
 	var dependsOn, directDeps []string
 	var deps []ftypes.Dependency
@@ -111,11 +112,10 @@ func (p *Parser) Parse(r xio.ReadSeekerAt) ([]ftypes.Package, []ftypes.Dependenc
 func countLeadingSpace(line string) int {
 	i := 0
 	for _, runeValue := range line {
-		if runeValue == ' ' {
-			i++
-		} else {
+		if runeValue != ' ' {
 			break
 		}
+		i++
 	}
 	return i
 }

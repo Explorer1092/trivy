@@ -50,16 +50,16 @@ func newJuliaAnalyzer(_ analyzer.AnalyzerOptions) (analyzer.PostAnalyzer, error)
 	}, nil
 }
 
-func (a juliaAnalyzer) PostAnalyze(_ context.Context, input analyzer.PostAnalysisInput) (*analyzer.AnalysisResult, error) {
+func (a juliaAnalyzer) PostAnalyze(ctx context.Context, input analyzer.PostAnalysisInput) (*analyzer.AnalysisResult, error) {
 	var apps []types.Application
 
-	required := func(path string, d fs.DirEntry) bool {
-		return filepath.Base(path) == types.JuliaManifest
+	required := func(path string, _ fs.DirEntry) bool {
+		return filepath.Base(path) == types.JuliaManifest || input.FilePatterns.Match(path)
 	}
 
-	err := fsutils.WalkDir(input.FS, ".", required, func(path string, d fs.DirEntry, r io.Reader) error {
+	err := fsutils.WalkDir(input.FS, ".", required, func(path string, _ fs.DirEntry, r io.Reader) error {
 		// Parse Manifest.toml
-		app, err := a.parseJuliaManifest(path, r)
+		app, err := a.parseJuliaManifest(ctx, path, r)
 		if err != nil {
 			return xerrors.Errorf("parse error: %w", err)
 		} else if app == nil {
@@ -98,8 +98,8 @@ func (a juliaAnalyzer) Version() int {
 	return version
 }
 
-func (a juliaAnalyzer) parseJuliaManifest(path string, r io.Reader) (*types.Application, error) {
-	return language.Parse(types.Julia, path, r, a.lockParser)
+func (a juliaAnalyzer) parseJuliaManifest(ctx context.Context, path string, r io.Reader) (*types.Application, error) {
+	return language.Parse(ctx, types.Julia, path, r, a.lockParser)
 }
 
 func (a juliaAnalyzer) analyzeDependencies(fsys fs.FS, dir string, app *types.Application) error {
@@ -155,6 +155,7 @@ func walkDependencies(directDeps map[string]string, allPackages types.Packages, 
 	visited := make(map[string]types.Package)
 	for _, uuid := range directDeps {
 		if pkg, ok := pkgsByID[uuid]; ok {
+			pkg.Relationship = types.RelationshipDirect
 			pkg.Indirect = false
 			pkg.Dev = dev
 			visited[pkg.ID] = pkg
@@ -181,6 +182,7 @@ func walkIndirectDependencies(rootPkg types.Package, allPkgIDs, visited map[stri
 			continue
 		}
 
+		dep.Relationship = types.RelationshipIndirect
 		dep.Indirect = true
 		dep.Dev = rootPkg.Dev
 		visited[dep.ID] = dep

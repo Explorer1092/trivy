@@ -1,31 +1,17 @@
 package options
 
-import (
-	"github.com/aquasecurity/trivy/pkg/iac/framework"
-)
-
-type ConfigurableScanner interface {
-	SetFrameworks(frameworks []framework.Framework)
-	SetRegoOnly(regoOnly bool)
-	SetIncludeDeprecatedChecks(bool)
-}
-
-func ScannerWithIncludeDeprecatedChecks(enabled bool) ScannerOption {
-	return func(s ConfigurableScanner) {
-		s.SetIncludeDeprecatedChecks(enabled)
-	}
-}
+type ConfigurableScanner any
 
 type ScannerOption func(s ConfigurableScanner)
 
-func ScannerWithFrameworks(frameworks ...framework.Framework) ScannerOption {
-	return func(s ConfigurableScanner) {
-		s.SetFrameworks(frameworks)
-	}
+type RawConfigScanner interface {
+	SetScanRawConfig(v bool)
 }
 
-func ScannerWithRegoOnly(regoOnly bool) ScannerOption {
+func WithScanRawConfig(v bool) ScannerOption {
 	return func(s ConfigurableScanner) {
-		s.SetRegoOnly(regoOnly)
+		if ss, ok := s.(RawConfigScanner); ok {
+			ss.SetScanRawConfig(v)
+		}
 	}
 }

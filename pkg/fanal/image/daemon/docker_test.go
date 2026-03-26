@@ -3,7 +3,6 @@ package daemon
 import (
 	"testing"
 
-	"github.com/docker/docker/api/types"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/stretchr/testify/assert"
@@ -12,9 +11,8 @@ import (
 
 func TestDockerImage(t *testing.T) {
 	type fields struct {
-		Image   v1.Image
-		opener  opener
-		inspect types.ImageInspect
+		Image  v1.Image
+		opener opener
 	}
 	tests := []struct {
 		name      string
@@ -39,7 +37,7 @@ func TestDockerImage(t *testing.T) {
 			ref, err := name.ParseReference(tt.imageName)
 			require.NoError(t, err)
 
-			_, cleanup, err := DockerImage(ref, "")
+			_, cleanup, err := DockerImage(t.Context(), ref, "")
 			assert.Equal(t, tt.wantErr, err != nil, err)
 			defer func() {
 				if cleanup != nil {

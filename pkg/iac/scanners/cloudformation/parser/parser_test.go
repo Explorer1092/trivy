@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,16 +13,13 @@ import (
 )
 
 func parseFile(t *testing.T, source, name string) (FileContexts, error) {
-	tmp, err := os.MkdirTemp(os.TempDir(), "defsec")
-	require.NoError(t, err)
-	defer func() { _ = os.RemoveAll(tmp) }()
-	require.NoError(t, os.WriteFile(filepath.Join(tmp, name), []byte(source), 0600))
+	tmp := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, name), []byte(source), 0o600))
 	fs := os.DirFS(tmp)
-	return New().ParseFS(context.TODO(), fs, ".")
+	return New().ParseFS(t.Context(), fs, ".")
 }
 
 func Test_parse_yaml(t *testing.T) {
-
 	source := `---
 Parameters:
   BucketName: 
@@ -101,7 +97,6 @@ func Test_parse_json(t *testing.T) {
 }
 
 func Test_parse_yaml_with_map_ref(t *testing.T) {
-
 	source := `---
 Parameters:
   BucketName: 
@@ -138,7 +133,6 @@ Resources:
 }
 
 func Test_parse_yaml_with_intrinsic_functions(t *testing.T) {
-
 	source := `---
 Parameters:
   BucketName: 
@@ -232,8 +226,7 @@ Resources:
 }
 
 func TestParse_WithParameters(t *testing.T) {
-
-	fs := testutil.CreateFS(t, map[string]string{
+	fs := testutil.CreateFS(map[string]string{
 		"main.yaml": `AWSTemplateFormatVersion: 2010-09-09
 Parameters:
   KmsMasterKeyId:
@@ -252,7 +245,7 @@ Resources:
 	}
 	p := New(WithParameters(params))
 
-	files, err := p.ParseFS(context.TODO(), fs, ".")
+	files, err := p.ParseFS(t.Context(), fs, ".")
 	require.NoError(t, err)
 	require.Len(t, files, 1)
 
@@ -266,7 +259,7 @@ Resources:
 }
 
 func TestParse_WithParameterFiles(t *testing.T) {
-	fs := testutil.CreateFS(t, map[string]string{
+	fs := testutil.CreateFS(map[string]string{
 		"main.yaml": `AWSTemplateFormatVersion: 2010-09-09
 Parameters:
   KmsMasterKeyId:
@@ -289,7 +282,7 @@ Resources:
 
 	p := New(WithParameterFiles("params.json"))
 
-	files, err := p.ParseFS(context.TODO(), fs, ".")
+	files, err := p.ParseFS(t.Context(), fs, ".")
 	require.NoError(t, err)
 	require.Len(t, files, 1)
 
@@ -303,7 +296,7 @@ Resources:
 }
 
 func TestParse_WithConfigFS(t *testing.T) {
-	fs := testutil.CreateFS(t, map[string]string{
+	fs := testutil.CreateFS(map[string]string{
 		"queue.yaml": `AWSTemplateFormatVersion: 2010-09-09
 Parameters:
   KmsMasterKeyId:
@@ -328,7 +321,7 @@ Resources:
 `,
 	})
 
-	configFS := testutil.CreateFS(t, map[string]string{
+	configFS := testutil.CreateFS(map[string]string{
 		"/workdir/parameters/queue.json": `[
       {
            "ParameterKey": "KmsMasterKeyId",
@@ -345,11 +338,11 @@ Resources:
 	})
 
 	p := New(
-		WithParameterFiles("/workdir/parameters/queue.json", "/workdir/parameters/s3.json"),
+		WithParameterFiles("workdir/parameters/queue.json", "workdir/parameters/s3.json"),
 		WithConfigsFS(configFS),
 	)
 
-	files, err := p.ParseFS(context.TODO(), fs, ".")
+	files, err := p.ParseFS(t.Context(), fs, ".")
 	require.NoError(t, err)
 	require.Len(t, files, 2)
 
@@ -398,11 +391,11 @@ func TestJsonWithNumbers(t *testing.T) {
 }
 `
 
-	fsys := testutil.CreateFS(t, map[string]string{
+	fsys := testutil.CreateFS(map[string]string{
 		"main.json": src,
 	})
 
-	files, err := New().ParseFS(context.TODO(), fsys, ".")
+	files, err := New().ParseFS(t.Context(), fsys, ".")
 
 	require.NoError(t, err)
 	require.Len(t, files, 1)
@@ -432,11 +425,215 @@ Conditions:
   SubscribeEmail: !Not [!Equals [ !Ref Email, ""]]
 `
 
-	fsys := testutil.CreateFS(t, map[string]string{
+	fsys := testutil.CreateFS(map[string]string{
 		"main.yaml": src,
 	})
 
-	files, err := New().ParseFS(context.TODO(), fsys, ".")
+	files, err := New().ParseFS(t.Context(), fsys, ".")
 	require.NoError(t, err)
 	require.Len(t, files, 1)
+}
+
+func Test_TemplateWithNullProperty(t *testing.T) {
+	src := `AWSTemplateFormatVersion: "2010-09-09"
+Resources:
+  TestBucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName:`
+
+	fsys := testutil.CreateFS(map[string]string{
+		"main.yaml": src,
+	})
+
+	files, err := New().ParseFS(t.Context(), fsys, ".")
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+
+	file := files[0]
+
+	res := file.GetResourceByLogicalID("TestBucket")
+
+	assert.True(t, res.GetProperty("BucketName").IsNil())
+}
+
+func Test_TemplateWithNullNestedProperty(t *testing.T) {
+	src := `AWSTemplateFormatVersion: "2010-09-09"
+Description: "BAD"
+Resources:
+  TestBucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: test
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: null`
+
+	fsys := testutil.CreateFS(map[string]string{
+		"main.yaml": src,
+	})
+
+	files, err := New().ParseFS(t.Context(), fsys, ".")
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+
+	file := files[0]
+
+	res := file.GetResourceByLogicalID("TestBucket")
+
+	assert.True(t, res.GetProperty("PublicAccessBlockConfiguration.BlockPublicAcls").IsNil())
+}
+
+func Test_ExpandForEachYAML(t *testing.T) {
+	source := `AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::LanguageExtensions
+Parameters:
+  TopicNamesParam:
+    Type: CommaDelimitedList
+    Default: Success,Failure
+Mappings:
+  Success:
+    Properties:
+      DisplayName: success
+      FifoTopic: "true"
+  Failure:
+    Properties:
+      DisplayName: failure
+      FifoTopic: "false"
+Resources:
+  'Fn::ForEach::Topics':
+    - TopicName
+    - !Split [",", !Ref TopicNamesParam]
+    - 'SnsTopic${TopicName}':
+        Type: 'AWS::SNS::Topic'
+        Properties:
+          TopicName: !Sub '${TopicName}.fifo'
+          'Fn::ForEach::Properties':
+          - PropertyName
+          - [DisplayName, FifoTopic]
+          - '${PropertyName}':
+             'Fn::FindInMap':
+               - Ref: 'TopicName'
+               - Properties
+               - Ref: 'PropertyName'
+      'Fn::ForEach::Subscriptions':
+      - SubName
+      - ['Alpha', 'Beta']
+      - 'SnsSubscription${TopicName}${SubName}':
+          Type: 'AWS::SNS::Subscription'
+          Properties:
+            TopicArn: !Ref 'SnsTopic${TopicName}'
+            Protocol: email
+            Endpoint: !Sub '${SubName}@example.com'
+`
+
+	files, err := parseFile(t, source, "cf.yaml")
+	require.NoError(t, err)
+	file := files[0]
+
+	assert.Len(t, file.Resources, 6)
+
+	tests := []struct {
+		LogicalID string
+		Props     map[string]any
+	}{
+		// SnsTopic
+		{
+			"SnsTopicSuccess",
+			map[string]any{
+				"TopicName":   "Success.fifo",
+				"DisplayName": "success",
+				"FifoTopic":   "true",
+			},
+		},
+		{
+			"SnsTopicFailure",
+			map[string]any{
+				"TopicName":   "Failure.fifo",
+				"DisplayName": "failure",
+				"FifoTopic":   "false",
+			},
+		},
+		// SnsSubscription
+		{
+			"SnsSubscriptionSuccessAlpha",
+			map[string]any{
+				"TopicArn": "SnsTopicSuccess",
+				"Protocol": "email",
+				"Endpoint": "Alpha@example.com",
+			},
+		},
+		{
+			"SnsSubscriptionSuccessBeta",
+			map[string]any{
+				"TopicArn": "SnsTopicSuccess",
+				"Protocol": "email",
+				"Endpoint": "Beta@example.com",
+			},
+		},
+		{
+			"SnsSubscriptionFailureAlpha",
+			map[string]any{
+				"TopicArn": "SnsTopicFailure",
+				"Protocol": "email",
+				"Endpoint": "Alpha@example.com",
+			},
+		},
+		{
+			"SnsSubscriptionFailureBeta",
+			map[string]any{
+				"TopicArn": "SnsTopicFailure",
+				"Protocol": "email",
+				"Endpoint": "Beta@example.com",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.LogicalID, func(t *testing.T) {
+			res, ok := file.Resources[tt.LogicalID]
+			require.True(t, ok)
+			for propName, expected := range tt.Props {
+				prop := res.GetProperty(propName)
+				assert.Equal(t, expected, prop.RawValue())
+			}
+		})
+	}
+}
+
+func Test_ExpandForEachJSON(t *testing.T) {
+	source := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Transform": "AWS::LanguageExtensions",
+		"Resources": {
+			"Fn::ForEach::Buckets": [
+				"Suffix",
+				["A", "B"],
+				{
+					"S3Bucket${Suffix}": {
+						"Type": "AWS::S3::Bucket",
+						"Properties": {
+							"BucketName": { "Fn::Sub": "bucket-${Suffix}" }
+						}
+					}
+				}
+			]
+		}
+	}`
+
+	files, err := parseFile(t, source, "cf.json")
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+
+	file := files[0]
+	require.Len(t, file.Resources, 2)
+
+	b1, ok := file.Resources["S3BucketA"]
+	require.True(t, ok)
+	assert.Equal(t, "AWS::S3::Bucket", b1.Type())
+	assert.Equal(t, "bucket-A", b1.GetProperty("BucketName").AsString())
+
+	b2, ok := file.Resources["S3BucketB"]
+	require.True(t, ok)
+	assert.Equal(t, "AWS::S3::Bucket", b2.Type())
+	assert.Equal(t, "bucket-B", b2.GetProperty("BucketName").AsString())
 }

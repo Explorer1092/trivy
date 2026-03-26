@@ -3,11 +3,11 @@ package testutil
 import (
 	"encoding/json"
 	"io/fs"
-	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 
-	"github.com/liamg/memoryfs"
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -18,7 +18,7 @@ func AssertRuleFound(t *testing.T, ruleID string, results scan.Results, message 
 	found := ruleIDInResults(ruleID, results.GetFailed())
 	assert.True(t, found, append([]any{message}, args...)...)
 	for _, result := range results.GetFailed() {
-		if result.Rule().LongID() == ruleID {
+		if result.Rule().CanonicalID() == ruleID {
 			m := result.Metadata()
 			meta := &m
 			for meta != nil {
@@ -36,25 +36,29 @@ func AssertRuleNotFound(t *testing.T, ruleID string, results scan.Results, messa
 	assert.False(t, found, append([]any{message}, args...)...)
 }
 
+func AssertRuleNotFailed(t *testing.T, ruleID string, results scan.Results, message string, args ...any) {
+	failedExists := ruleIDInResults(ruleID, results.GetFailed())
+	assert.False(t, failedExists, append([]any{message}, args...)...)
+	passedResults := lo.Filter(results, func(res scan.Result, _ int) bool {
+		return res.Status() == scan.StatusPassed || res.Status() == scan.StatusIgnored
+	})
+	passedExists := ruleIDInResults(ruleID, passedResults)
+	assert.True(t, passedExists, append([]any{message}, args...)...)
+}
+
 func ruleIDInResults(ruleID string, results scan.Results) bool {
 	for _, res := range results {
-		if res.Rule().LongID() == ruleID {
+		if res.Rule().CanonicalID() == ruleID {
 			return true
 		}
 	}
 	return false
 }
 
-func CreateFS(t *testing.T, files map[string]string) fs.FS {
-	memfs := memoryfs.New()
-	for name, content := range files {
-		name := strings.TrimPrefix(name, "/")
-		err := memfs.MkdirAll(filepath.Dir(name), 0o700)
-		require.NoError(t, err)
-		err = memfs.WriteFile(name, []byte(content), 0o644)
-		require.NoError(t, err)
-	}
-	return memfs
+func CreateFS(files map[string]string) fs.FS {
+	return fstest.MapFS(lo.MapEntries(files, func(k, v string) (string, *fstest.MapFile) {
+		return strings.TrimPrefix(k, "/"), &fstest.MapFile{Data: []byte(v)}
+	}))
 }
 
 func AssertDefsecEqual(t *testing.T, expected, actual any) {

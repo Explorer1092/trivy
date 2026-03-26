@@ -23,11 +23,11 @@ func MapSpecCheckIDToFilteredResults(result types.Result, checkIDs map[types.Sca
 	}
 	for _, m := range result.Misconfigurations {
 		// Skip irrelevant check IDs
-		if !slices.Contains(checkIDs[types.MisconfigScanner], m.AVDID) {
+		if !slices.Contains(checkIDs[types.MisconfigScanner], m.ID) {
 			continue
 		}
 
-		mapCheckByID[m.AVDID] = append(mapCheckByID[m.AVDID], types.Result{
+		mapCheckByID[m.ID] = append(mapCheckByID[m.ID], types.Result{
 			Target:            result.Target,
 			Class:             result.Class,
 			Type:              result.Type,
@@ -49,8 +49,6 @@ func misconfigSummary(misconfig types.DetectedMisconfiguration) *types.MisconfSu
 		rms.Successes = 1
 	case types.MisconfStatusFailure:
 		rms.Failures = 1
-	case types.MisconfStatusException:
-		rms.Exceptions = 1
 	}
 	return &rms
 }

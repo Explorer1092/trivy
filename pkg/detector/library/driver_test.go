@@ -66,7 +66,10 @@ func TestDriver_Detect(t *testing.T) {
 			},
 			want: []types.DetectedVulnerability{
 				{
-					VulnerabilityID:  "CVE-2022-21235",
+					VulnerabilityID: "CVE-2022-21235",
+					VendorIDs: []string{
+						"GHSA-6635-c626-vj4r",
+					},
 					PkgName:          "github.com/Masterminds/vcs",
 					InstalledVersion: "v1.13.1",
 					FixedVersion:     "v1.13.2",
@@ -74,6 +77,34 @@ func TestDriver_Detect(t *testing.T) {
 						ID:   vulnerability.GLAD,
 						Name: "GitLab Advisory Database Community",
 						URL:  "https://gitlab.com/gitlab-org/advisories-community",
+					},
+				},
+			},
+		},
+		{
+			name: "julia package",
+			fixtures: []string{
+				"testdata/fixtures/julia.yaml",
+				"testdata/fixtures/data-source.yaml",
+			},
+			libType: ftypes.Julia,
+			args: args{
+				pkgName: "HTTP",
+				pkgVer:  "1.10.16",
+			},
+			want: []types.DetectedVulnerability{
+				{
+					VulnerabilityID:  "CVE-2025-52479",
+					PkgName:          "HTTP",
+					InstalledVersion: "1.10.16",
+					FixedVersion:     "1.10.17",
+					DataSource: &dbTypes.DataSource{
+						ID:   vulnerability.Julia,
+						Name: "Julia Ecosystem Security Advisories",
+						URL:  "https://github.com/JuliaLang/SecurityAdvisories.jl",
+					},
+					VendorIDs: []string{
+						"JLSEC-2025-1",
 					},
 				},
 			},
@@ -155,7 +186,7 @@ func TestDriver_Detect(t *testing.T) {
 				pkgName: "symfony/symfony",
 				pkgVer:  "5.1.5",
 			},
-			wantErr: "failed to unmarshal advisory JSON",
+			wantErr: "json unmarshal error",
 		},
 		{
 			name: "duplicated version in advisory",
@@ -182,6 +213,32 @@ func TestDriver_Detect(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "Custom data for vulnerability",
+			fixtures: []string{
+				"testdata/fixtures/go-custom-data.yaml",
+				"testdata/fixtures/data-source.yaml",
+			},
+			libType: ftypes.GoBinary,
+			args: args{
+				pkgName: "github.com/docker/docker",
+				pkgVer:  "23.0.14",
+			},
+			want: []types.DetectedVulnerability{
+				{
+					VulnerabilityID:  "GHSA-v23v-6jw2-98fq",
+					PkgName:          "github.com/docker/docker",
+					InstalledVersion: "23.0.14",
+					FixedVersion:     "23.0.15, 26.1.5, 27.1.1, 25.0.6",
+					DataSource: &dbTypes.DataSource{
+						ID:   vulnerability.GHSA,
+						Name: "GitHub Security Advisory Go",
+						URL:  "https://github.com/advisories?query=type%3Areviewed+ecosystem%3Ago",
+					},
+					Custom: map[string]any{"Severity": 2.0},
+				},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -194,8 +251,7 @@ func TestDriver_Detect(t *testing.T) {
 
 			got, err := driver.DetectVulnerabilities("", tt.args.pkgName, tt.args.pkgVer)
 			if tt.wantErr != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.wantErr)
+				require.ErrorContains(t, err, tt.wantErr)
 				return
 			}
 

@@ -52,20 +52,19 @@ func newNugetLibraryAnalyzer(_ analyzer.AnalyzerOptions) (analyzer.PostAnalyzer,
 	}, nil
 }
 
-func (a *nugetLibraryAnalyzer) PostAnalyze(_ context.Context, input analyzer.PostAnalysisInput) (*analyzer.AnalysisResult, error) {
+func (a *nugetLibraryAnalyzer) PostAnalyze(ctx context.Context, input analyzer.PostAnalysisInput) (*analyzer.AnalysisResult, error) {
 	var apps []types.Application
 	foundLicenses := make(map[string][]string)
 	if a.licenseParser.packagesDir == "" {
 		a.logger.Debug("The nuget packages directory couldn't be found. License search disabled")
 	}
 
-	// We saved only config and lock files in the FS,
-	// so we need to parse all saved files
-	required := func(path string, d fs.DirEntry) bool {
+	required := func(_ string, _ fs.DirEntry) bool {
+		// Parse all required files: `packages.lock.json`, `packages.config` (from a.Required func) + input.FilePatterns.Match()
 		return true
 	}
 
-	err := fsutils.WalkDir(input.FS, ".", required, func(path string, d fs.DirEntry, r io.Reader) error {
+	err := fsutils.WalkDir(input.FS, ".", required, func(path string, _ fs.DirEntry, r io.Reader) error {
 		// Set the default parser
 		parser := a.lockParser
 
@@ -74,7 +73,7 @@ func (a *nugetLibraryAnalyzer) PostAnalyze(_ context.Context, input analyzer.Pos
 			parser = a.configParser
 		}
 
-		app, err := language.Parse(types.NuGet, path, r, parser)
+		app, err := language.Parse(ctx, types.NuGet, path, r, parser)
 		if err != nil {
 			return xerrors.Errorf("NuGet parse error: %w", err)
 		}

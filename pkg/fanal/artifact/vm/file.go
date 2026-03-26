@@ -24,6 +24,8 @@ import (
 // If vm type vmdk max cache memory size 64 MB
 const storageFILECacheSize = 1024
 
+const imageFileArtifactVersion = 0
+
 // ImageFile represents an local VM image file
 type ImageFile struct {
 	Storage
@@ -33,11 +35,18 @@ type ImageFile struct {
 	reader   *io.SectionReader
 }
 
-func newFile(filePath string, storage Storage) (*ImageFile, error) {
+func newFile(filePath string, storage Storage) (imgFile *ImageFile, err error) {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return nil, xerrors.Errorf("file open error: %w", err)
 	}
+
+	// Close file on error
+	defer func() {
+		if err != nil && f != nil {
+			f.Close()
+		}
+	}()
 
 	c, err := lru.New[string, []byte](storageFILECacheSize)
 	if err != nil {
@@ -80,13 +89,13 @@ func (a *ImageFile) Inspect(ctx context.Context) (artifact.Reference, error) {
 		return artifact.Reference{}, xerrors.Errorf("cache calculation error: %w", err)
 	}
 
-	if err = a.cache.PutBlob(cacheKey, blobInfo); err != nil {
+	if err = a.cache.PutBlob(ctx, cacheKey, blobInfo); err != nil {
 		return artifact.Reference{}, xerrors.Errorf("failed to store blob (%s) in cache: %w", cacheKey, err)
 	}
 
 	return artifact.Reference{
 		Name:    a.filePath,
-		Type:    artifact.TypeVM,
+		Type:    types.TypeVM,
 		ID:      cacheKey, // use a cache key as pseudo artifact ID
 		BlobIDs: []string{cacheKey},
 	}, nil
@@ -100,7 +109,7 @@ func (a *ImageFile) calcCacheKey(blobInfo types.BlobInfo) (string, error) {
 	}
 
 	d := digest.NewDigest(digest.SHA256, h)
-	cacheKey, err := cache.CalcKey(d.String(), a.analyzer.AnalyzerVersions(), a.handlerManager.Versions(), a.artifactOption)
+	cacheKey, err := cache.CalcKey(d.String(), imageFileArtifactVersion, a.analyzer.AnalyzerVersions(), a.handlerManager.Versions(), a.artifactOption)
 	if err != nil {
 		return "", xerrors.Errorf("cache key: %w", err)
 	}
@@ -110,5 +119,5 @@ func (a *ImageFile) calcCacheKey(blobInfo types.BlobInfo) (string, error) {
 
 func (a *ImageFile) Clean(reference artifact.Reference) error {
 	_ = a.file.Close()
-	return a.cache.DeleteBlobs(reference.BlobIDs)
+	return a.cache.DeleteBlobs(context.TODO(), reference.BlobIDs)
 }

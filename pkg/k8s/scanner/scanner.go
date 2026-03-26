@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	ms "github.com/mitchellh/mapstructure"
+	ms "github.com/go-viper/mapstructure/v2"
 	"github.com/package-url/packageurl-go"
 	"github.com/samber/lo"
 	"golang.org/x/xerrors"
@@ -15,6 +15,7 @@ import (
 	"github.com/aquasecurity/go-version/pkg/version"
 	"github.com/aquasecurity/trivy-kubernetes/pkg/artifacts"
 	"github.com/aquasecurity/trivy-kubernetes/pkg/bom"
+	"github.com/aquasecurity/trivy/pkg/cache"
 	cmd "github.com/aquasecurity/trivy/pkg/commands/artifact"
 	"github.com/aquasecurity/trivy/pkg/digest"
 	ftypes "github.com/aquasecurity/trivy/pkg/fanal/types"
@@ -26,7 +27,7 @@ import (
 	"github.com/aquasecurity/trivy/pkg/purl"
 	"github.com/aquasecurity/trivy/pkg/sbom/core"
 	"github.com/aquasecurity/trivy/pkg/sbom/cyclonedx"
-	"github.com/aquasecurity/trivy/pkg/scanner/local"
+	"github.com/aquasecurity/trivy/pkg/scan/local"
 	"github.com/aquasecurity/trivy/pkg/types"
 )
 
@@ -82,14 +83,18 @@ func (s *Scanner) Scan(ctx context.Context, artifactsData []*artifacts.Artifact)
 
 	var resources []report.Resource
 
-	type scanResult struct {
-		vulns     []report.Resource
-		misconfig report.Resource
+	// scans kubernetes artifacts as a scope of yaml files
+	if local.ShouldScanMisconfigOrRbac(s.opts.Scanners) {
+		misconfigs, err := s.scanMisconfigs(ctx, resourceArtifacts)
+		if err != nil {
+			return report.Report{}, xerrors.Errorf("scanning misconfigurations error: %w", err)
+		}
+		resources = append(resources, misconfigs...)
 	}
 
-	onItem := func(ctx context.Context, artifact *artifacts.Artifact) (scanResult, error) {
-		scanResults := scanResult{}
-		if s.opts.Scanners.AnyEnabled(types.VulnerabilityScanner, types.SecretScanner) && !s.opts.SkipImages {
+	// scan images from kubernetes cluster in parallel
+	if s.opts.Scanners.AnyEnabled(types.VulnerabilityScanner, types.SecretScanner) && !s.opts.SkipImages {
+		onItem := func(ctx context.Context, artifact *artifacts.Artifact) ([]report.Resource, error) {
 			opts := s.opts
 			opts.Credentials = make([]ftypes.Credential, len(s.opts.Credentials))
 			copy(opts.Credentials, s.opts.Credentials)
@@ -106,33 +111,27 @@ func (s *Scanner) Scan(ctx context.Context, artifactsData []*artifacts.Artifact)
 			}
 			vulns, err := s.scanVulns(ctx, artifact, opts)
 			if err != nil {
-				return scanResult{}, xerrors.Errorf("scanning vulnerabilities error: %w", err)
+				return nil, xerrors.Errorf("scanning vulnerabilities error: %w", err)
 			}
-			scanResults.vulns = vulns
+			return vulns, nil
 		}
-		if local.ShouldScanMisconfigOrRbac(s.opts.Scanners) {
-			misconfig, err := s.scanMisconfigs(ctx, artifact)
-			if err != nil {
-				return scanResult{}, xerrors.Errorf("scanning misconfigurations error: %w", err)
-			}
-			scanResults.misconfig = misconfig
+
+		onResult := func(result []report.Resource) error {
+			resources = append(resources, result...)
+			return nil
 		}
-		return scanResults, nil
+		workers := s.opts.Parallel
+		if s.opts.CacheBackend == string(cache.TypeFS) {
+			// To avoid lock contention in bbolt, we limit the number of workers to 1 when using FS cache.
+			workers = 1
+		}
+
+		p := parallel.NewPipeline(workers, !s.opts.Quiet, resourceArtifacts, onItem, onResult)
+		if err := p.Do(ctx); err != nil {
+			return report.Report{}, err
+		}
 	}
 
-	onResult := func(result scanResult) error {
-		resources = append(resources, result.vulns...)
-		// don't add empty misconfig results to resources slice to avoid an empty resource
-		if result.misconfig.Results != nil {
-			resources = append(resources, result.misconfig)
-		}
-		return nil
-	}
-
-	p := parallel.NewPipeline(s.opts.Parallel, !s.opts.Quiet, resourceArtifacts, onItem, onResult)
-	if err := p.Do(ctx); err != nil {
-		return report.Report{}, err
-	}
 	if s.opts.Scanners.AnyEnabled(types.VulnerabilityScanner) {
 		k8sResource, err := s.scanK8sVulns(ctx, k8sCoreArtifacts)
 		if err != nil {
@@ -173,23 +172,54 @@ func (s *Scanner) scanVulns(ctx context.Context, artifact *artifacts.Artifact, o
 	return resources, nil
 }
 
-func (s *Scanner) scanMisconfigs(ctx context.Context, artifact *artifacts.Artifact) (report.Resource, error) {
-	configFile, err := createTempFile(artifact)
+func (s *Scanner) scanMisconfigs(ctx context.Context, k8sArtifacts []*artifacts.Artifact) ([]report.Resource, error) {
+	dir, artifactsByFilename, err := generateTempDir(k8sArtifacts)
 	if err != nil {
-		return report.Resource{}, xerrors.Errorf("scan error: %w", err)
+		return nil, xerrors.Errorf("failed to generate temp dir: %w", err)
 	}
 
-	s.opts.Target = configFile
+	s.opts.Target = dir
+	origCacheBackend := s.opts.CacheBackend
+	// Using an in-memory cache is safe since scanning k8s is not supported in client/server mode,
+	// and the cache created during file system scanning is removed after each scan.
+	s.opts.CacheBackend = string(cache.TypeMemory)
+
+	defer func() {
+		// remove config files
+		removeDir(dir)
+		// restore cache backend
+		s.opts.CacheBackend = origCacheBackend
+	}()
 
 	configReport, err := s.runner.ScanFilesystem(ctx, s.opts)
-	// remove config file after scanning
-	removeFile(configFile)
+
 	if err != nil {
-		return report.CreateResource(artifact, configReport, err), err
+		return nil, xerrors.Errorf("failed to scan filesystem: %w", err)
+	}
+	resources := make([]report.Resource, 0, len(k8sArtifacts))
+
+	for _, res := range configReport.Results {
+		artifact := artifactsByFilename[res.Target]
+
+		singleReport := types.Report{
+			SchemaVersion: configReport.SchemaVersion,
+			CreatedAt:     configReport.CreatedAt,
+			ArtifactName:  res.Target,
+			ArtifactType:  configReport.ArtifactType,
+			Metadata:      configReport.Metadata,
+			Results:       types.Results{res},
+		}
+
+		resource, err := s.filter(ctx, singleReport, artifact)
+		if err != nil {
+			resource = report.CreateResource(artifact, singleReport, err)
+		}
+		resources = append(resources, resource)
 	}
 
-	return s.filter(ctx, configReport, artifact)
+	return resources, nil
 }
+
 func (s *Scanner) filter(ctx context.Context, r types.Report, artifact *artifacts.Artifact) (report.Resource, error) {
 	var err error
 	r, err = s.runner.Filter(ctx, s.opts, r)
@@ -210,15 +240,16 @@ const (
 
 func (s *Scanner) scanK8sVulns(ctx context.Context, artifactsData []*artifacts.Artifact) ([]report.Resource, error) {
 	var resources []report.Resource
-	var nodeName string
-	if nodeName = s.findNodeName(artifactsData); nodeName == "" {
-		return resources, nil
-	}
+
+	// Find the first node name to identify cluster type
+	nodeName := s.findNodeName(artifactsData)
 
 	k8sScanner := k8s.NewKubernetesScanner()
 	scanOptions := types.ScanOptions{
-		Scanners: s.opts.Scanners,
-		PkgTypes: s.opts.PkgTypes,
+		Scanners:            s.opts.Scanners,
+		PkgTypes:            s.opts.PkgTypes,
+		PkgRelationships:    s.opts.PackageOptions.PkgRelationships,
+		VulnSeveritySources: s.opts.VulnSeveritySources,
 	}
 	for _, artifact := range artifactsData {
 		switch artifact.Kind {
@@ -228,8 +259,9 @@ func (s *Scanner) scanK8sVulns(ctx context.Context, artifactsData []*artifacts.A
 			if err != nil {
 				return nil, err
 			}
+			cpcVersion := unifiedVersion(comp.Version)
 
-			lang := k8sNamespace(comp.Version, nodeName)
+			lang := k8sNamespace(cpcVersion, nodeName)
 			results, _, err := k8sScanner.Scan(ctx, types.ScanTarget{
 				Applications: []ftypes.Application{
 					{
@@ -238,7 +270,7 @@ func (s *Scanner) scanK8sVulns(ctx context.Context, artifactsData []*artifacts.A
 						Packages: []ftypes.Package{
 							{
 								Name:    comp.Name,
-								Version: comp.Version,
+								Version: cpcVersion,
 							},
 						},
 					},
@@ -263,7 +295,7 @@ func (s *Scanner) scanK8sVulns(ctx context.Context, artifactsData []*artifacts.A
 			if err != nil {
 				return nil, err
 			}
-			kubeletVersion := sanitizedVersion(nf.KubeletVersion)
+			kubeletVersion := unifiedVersion(nf.KubeletVersion)
 			lang := k8sNamespace(kubeletVersion, nodeName)
 			runtimeName, runtimeVersion := runtimeNameVersion(nf.ContainerRuntimeVersion)
 			results, _, err := k8sScanner.Scan(ctx, types.ScanTarget{
@@ -357,11 +389,8 @@ func (s *Scanner) clusterInfoToReportResources(allArtifact []*artifacts.Artifact
 	var rootComponent *core.Component
 	var coreComponents []*core.Component
 
-	// Find the first node name to identify AKS cluster
-	var nodeName string
-	if nodeName = s.findNodeName(allArtifact); nodeName == "" {
-		return nil, fmt.Errorf("failed to find node name")
-	}
+	// Find the first node name to identify cluster type
+	nodeName := s.findNodeName(allArtifact)
 
 	kbom := core.NewBOM(core.Options{
 		GenerateBOMRef: true,
@@ -373,14 +402,15 @@ func (s *Scanner) clusterInfoToReportResources(allArtifact []*artifacts.Artifact
 			if err := ms.Decode(artifact.RawResource, &comp); err != nil {
 				return nil, err
 			}
+			cVersion := unifiedVersion(comp.Version)
 
 			controlPlane := &core.Component{
 				Name:       comp.Name,
-				Version:    comp.Version,
+				Version:    cVersion,
 				Type:       core.TypeApplication,
 				Properties: toProperties(comp.Properties, k8sCoreComponentNamespace),
 				PkgIdentifier: ftypes.PkgIdentifier{
-					PURL: generatePURL(comp.Name, comp.Version, nodeName),
+					PURL: generatePURL(comp.Name, cVersion, nodeName),
 				},
 			}
 			coreComponents = append(coreComponents, controlPlane)
@@ -391,7 +421,7 @@ func (s *Scanner) clusterInfoToReportResources(allArtifact []*artifacts.Artifact
 				if !strings.Contains(c.Digest, string(digest.SHA256)) {
 					cDigest = fmt.Sprintf("%s:%s", string(digest.SHA256), cDigest)
 				}
-				ver := sanitizedVersion(c.Version)
+				ver := unifiedVersion(c.Version)
 
 				imagePURL, err := purl.New(purl.TypeOCI, types.Metadata{
 					RepoDigests: []string{
@@ -434,13 +464,15 @@ func (s *Scanner) clusterInfoToReportResources(allArtifact []*artifacts.Artifact
 			if err := ms.Decode(artifact.RawResource, &cf); err != nil {
 				return nil, err
 			}
+			cVersion := unifiedVersion(cf.Version)
+
 			rootComponent = &core.Component{
 				Type:       core.TypePlatform,
 				Name:       cf.Name,
-				Version:    cf.Version,
+				Version:    cVersion,
 				Properties: toProperties(cf.Properties, k8sCoreComponentNamespace),
 				PkgIdentifier: ftypes.PkgIdentifier{
-					PURL: generatePURL(cf.Name, cf.Version, nodeName),
+					PURL: generatePURL(cf.Name, cVersion, nodeName),
 				},
 				Root: true,
 			}
@@ -460,7 +492,7 @@ func (s *Scanner) clusterInfoToReportResources(allArtifact []*artifacts.Artifact
 func (s *Scanner) nodeComponent(b *core.BOM, nf bom.NodeInfo) *core.Component {
 	osName, osVersion := osNameVersion(nf.OsImage)
 	runtimeName, runtimeVersion := runtimeNameVersion(nf.ContainerRuntimeVersion)
-	kubeletVersion := sanitizedVersion(nf.KubeletVersion)
+	kubeletVersion := unifiedVersion(nf.KubeletVersion)
 	properties := toProperties(nf.Properties, "")
 	properties = append(properties, toProperties(map[string]string{
 		k8sComponentType: k8sComponentNode,
@@ -543,16 +575,19 @@ func (s *Scanner) nodeComponent(b *core.BOM, nf bom.NodeInfo) *core.Component {
 	return nodeComponent
 }
 
-func sanitizedVersion(ver string) string {
-	return strings.TrimPrefix(ver, "v")
+func unifiedVersion(ver string) string {
+	if strings.HasPrefix(ver, "v") || ver == "" {
+		return ver
+	}
+	return "v" + ver
 }
 
 func osNameVersion(name string) (string, string) {
 	var buffer bytes.Buffer
 	var v string
 	var err error
-	parts := strings.Split(name, " ")
-	for _, p := range parts {
+	parts := strings.SplitSeq(name, " ")
+	for p := range parts {
 		_, err = version.Parse(p)
 		if err != nil {
 			buffer.WriteString(p + " ")
@@ -578,7 +613,7 @@ func runtimeNameVersion(name string) (string, string) {
 	case "cri-dockerd":
 		name = "github.com/Mirantis/cri-dockerd"
 	}
-	return name, ver
+	return name, unifiedVersion(ver)
 }
 
 func toProperties(props map[string]string, namespace string) []core.Property {

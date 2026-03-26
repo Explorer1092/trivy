@@ -2,7 +2,6 @@ package report_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"testing"
 
@@ -13,23 +12,30 @@ import (
 
 	dbTypes "github.com/aquasecurity/trivy-db/pkg/types"
 	"github.com/aquasecurity/trivy-db/pkg/vulnsrc/vulnerability"
-	"github.com/aquasecurity/trivy/pkg/fanal/artifact"
 	ftypes "github.com/aquasecurity/trivy/pkg/fanal/types"
 	"github.com/aquasecurity/trivy/pkg/report"
 	"github.com/aquasecurity/trivy/pkg/types"
 )
 
+// TestReportWriter_Sarif reuses report.PathToFileURI to compute expected URIs.
+// The correctness of PathToFileURI itself (including Windows path handling) is verified in TestWrite_Sarif.
 func TestReportWriter_Sarif(t *testing.T) {
+	tmpScanURI := report.PathToFileURI("/tmp/scan")
+
 	tests := []struct {
-		name  string
-		input types.Report
-		want  *sarif.Report
+		name   string
+		target string
+		input  types.Report
+		want   *sarif.Report
 	}{
 		{
 			name: "report with vulnerabilities",
+			// Container images don't have a local filesystem path, so target is empty
+			// and OriginalUriBaseIDs is omitted from the SARIF output.
+			target: "",
 			input: types.Report{
 				ArtifactName: "debian:9",
-				ArtifactType: artifact.TypeContainerImage,
+				ArtifactType: ftypes.TypeContainerImage,
 				Metadata: types.Metadata{
 					ImageID: "sha256:7640c3f9e75002deb419d5e32738eeff82cf2b3edca3781b4fe1f1f626d11b20",
 					RepoTags: []string{
@@ -41,7 +47,7 @@ func TestReportWriter_Sarif(t *testing.T) {
 				},
 				Results: types.Results{
 					{
-						Target: "library/test",
+						Target: "library/test 1",
 						Class:  types.ClassOSPkg,
 						Packages: []ftypes.Package{
 							{
@@ -120,6 +126,8 @@ func TestReportWriter_Sarif(t *testing.T) {
 											},
 											"precision":         "very-high",
 											"security-severity": "7.5",
+											"cvssv3_vector":     "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+											"cvssv3_baseScore":  7.5,
 										},
 										Help: &sarif.MultiformatMessageString{
 											Text:     lo.ToPtr("Vulnerability CVE-2020-0001\nSeverity: HIGH\nPackage: foo\nFixed Version: 3.4.5\nLink: [CVE-2020-0001](https://avd.aquasec.com/nvd/cve-2020-0001)\nbaz"),
@@ -137,10 +145,10 @@ func TestReportWriter_Sarif(t *testing.T) {
 								Message:   sarif.Message{Text: lo.ToPtr("Package: foo\nInstalled Version: 1.2.3\nVulnerability CVE-2020-0001\nSeverity: HIGH\nFixed Version: 3.4.5\nLink: [CVE-2020-0001](https://avd.aquasec.com/nvd/cve-2020-0001)")},
 								Locations: []*sarif.Location{
 									{
-										Message: &sarif.Message{Text: lo.ToPtr("library/test: foo@1.2.3")},
+										Message: &sarif.Message{Text: lo.ToPtr("library/test 1: foo@1.2.3")},
 										PhysicalLocation: &sarif.PhysicalLocation{
 											ArtifactLocation: &sarif.ArtifactLocation{
-												URI:       lo.ToPtr("library/test"),
+												URI:       lo.ToPtr("library/test%201"),
 												URIBaseId: lo.ToPtr("ROOTPATH"),
 											},
 											Region: &sarif.Region{
@@ -152,10 +160,10 @@ func TestReportWriter_Sarif(t *testing.T) {
 										},
 									},
 									{
-										Message: &sarif.Message{Text: lo.ToPtr("library/test: foo@1.2.3")},
+										Message: &sarif.Message{Text: lo.ToPtr("library/test 1: foo@1.2.3")},
 										PhysicalLocation: &sarif.PhysicalLocation{
 											ArtifactLocation: &sarif.ArtifactLocation{
-												URI:       lo.ToPtr("library/test"),
+												URI:       lo.ToPtr("library/test%201"),
 												URIBaseId: lo.ToPtr("ROOTPATH"),
 											},
 											Region: &sarif.Region{
@@ -170,11 +178,6 @@ func TestReportWriter_Sarif(t *testing.T) {
 							},
 						},
 						ColumnKind: "utf16CodeUnits",
-						OriginalUriBaseIDs: map[string]*sarif.ArtifactLocation{
-							"ROOTPATH": {
-								URI: lo.ToPtr("file:///"),
-							},
-						},
 						PropertyBag: sarif.PropertyBag{
 							Properties: map[string]any{
 								"imageName":   "debian:9",
@@ -188,11 +191,12 @@ func TestReportWriter_Sarif(t *testing.T) {
 			},
 		},
 		{
-			name: "report with misconfigurations",
+			name:   "report with misconfigurations",
+			target: "/tmp/scan",
 			input: types.Report{
 				Results: types.Results{
 					{
-						Target: "library/test",
+						Target: "library/test 1",
 						Class:  types.ClassConfig,
 						Misconfigurations: []types.DetectedMisconfiguration{
 							{
@@ -232,7 +236,7 @@ func TestReportWriter_Sarif(t *testing.T) {
 									{
 										ID:               "KSV001",
 										Name:             lo.ToPtr("Misconfiguration"),
-										ShortDescription: &sarif.MultiformatMessageString{Text: lo.ToPtr("Image tag &#39;:latest&#39; used")},
+										ShortDescription: &sarif.MultiformatMessageString{Text: lo.ToPtr("Image tag ':latest' used")},
 										FullDescription:  &sarif.MultiformatMessageString{Text: lo.ToPtr("")},
 										DefaultConfiguration: &sarif.ReportingConfiguration{
 											Level: "error",
@@ -283,13 +287,13 @@ func TestReportWriter_Sarif(t *testing.T) {
 								RuleID:    lo.ToPtr("KSV001"),
 								RuleIndex: lo.ToPtr[uint](0),
 								Level:     lo.ToPtr("error"),
-								Message:   sarif.Message{Text: lo.ToPtr("Artifact: library/test\nType: \nVulnerability KSV001\nSeverity: HIGH\nMessage: Message\nLink: [KSV001](https://avd.aquasec.com/appshield/ksv001)")},
+								Message:   sarif.Message{Text: lo.ToPtr("Artifact: library/test 1\nType: \nVulnerability KSV001\nSeverity: HIGH\nMessage: Message\nLink: [KSV001](https://avd.aquasec.com/appshield/ksv001)")},
 								Locations: []*sarif.Location{
 									{
-										Message: &sarif.Message{Text: lo.ToPtr("library/test")},
+										Message: &sarif.Message{Text: lo.ToPtr("library/test 1")},
 										PhysicalLocation: &sarif.PhysicalLocation{
 											ArtifactLocation: &sarif.ArtifactLocation{
-												URI:       lo.ToPtr("library/test"),
+												URI:       lo.ToPtr("library/test%201"),
 												URIBaseId: lo.ToPtr("ROOTPATH"),
 											},
 											Region: &sarif.Region{
@@ -306,13 +310,13 @@ func TestReportWriter_Sarif(t *testing.T) {
 								RuleID:    lo.ToPtr("KSV002"),
 								RuleIndex: lo.ToPtr[uint](1),
 								Level:     lo.ToPtr("error"),
-								Message:   sarif.Message{Text: lo.ToPtr("Artifact: library/test\nType: \nVulnerability KSV002\nSeverity: CRITICAL\nMessage: Message\nLink: [KSV002](https://avd.aquasec.com/appshield/ksv002)")},
+								Message:   sarif.Message{Text: lo.ToPtr("Artifact: library/test 1\nType: \nVulnerability KSV002\nSeverity: CRITICAL\nMessage: Message\nLink: [KSV002](https://avd.aquasec.com/appshield/ksv002)")},
 								Locations: []*sarif.Location{
 									{
-										Message: &sarif.Message{Text: lo.ToPtr("library/test")},
+										Message: &sarif.Message{Text: lo.ToPtr("library/test 1")},
 										PhysicalLocation: &sarif.PhysicalLocation{
 											ArtifactLocation: &sarif.ArtifactLocation{
-												URI:       lo.ToPtr("library/test"),
+												URI:       lo.ToPtr("library/test%201"),
 												URIBaseId: lo.ToPtr("ROOTPATH"),
 											},
 											Region: &sarif.Region{
@@ -329,7 +333,7 @@ func TestReportWriter_Sarif(t *testing.T) {
 						ColumnKind: "utf16CodeUnits",
 						OriginalUriBaseIDs: map[string]*sarif.ArtifactLocation{
 							"ROOTPATH": {
-								URI: lo.ToPtr("file:///"),
+								URI: lo.ToPtr(tmpScanURI),
 							},
 						},
 					},
@@ -337,11 +341,12 @@ func TestReportWriter_Sarif(t *testing.T) {
 			},
 		},
 		{
-			name: "report with secrets",
+			name:   "report with secrets",
+			target: "/tmp/scan",
 			input: types.Report{
 				Results: types.Results{
 					{
-						Target: "library/test",
+						Target: "library/test 1",
 						Class:  types.ClassSecret,
 						Secrets: []types.DetectedSecret{
 							{
@@ -373,7 +378,7 @@ func TestReportWriter_Sarif(t *testing.T) {
 										ID:               "aws-secret-access-key",
 										Name:             lo.ToPtr("Secret"),
 										ShortDescription: &sarif.MultiformatMessageString{Text: lo.ToPtr("AWS Secret Access Key")},
-										FullDescription:  &sarif.MultiformatMessageString{Text: lo.ToPtr("\u0026#39;AWS_secret_KEY\u0026#39;=\u0026#34;****************************************\u0026#34;")},
+										FullDescription:  &sarif.MultiformatMessageString{Text: lo.ToPtr("'AWS_secret_KEY'=\"****************************************\"")},
 										DefaultConfiguration: &sarif.ReportingConfiguration{
 											Level: "error",
 										},
@@ -400,13 +405,13 @@ func TestReportWriter_Sarif(t *testing.T) {
 								RuleID:    lo.ToPtr("aws-secret-access-key"),
 								RuleIndex: lo.ToPtr[uint](0),
 								Level:     lo.ToPtr("error"),
-								Message:   sarif.Message{Text: lo.ToPtr("Artifact: library/test\nType: \nSecret AWS Secret Access Key\nSeverity: CRITICAL\nMatch: 'AWS_secret_KEY'=\"****************************************\"")},
+								Message:   sarif.Message{Text: lo.ToPtr("Artifact: library/test 1\nType: \nSecret AWS Secret Access Key\nSeverity: CRITICAL\nMatch: 'AWS_secret_KEY'=\"****************************************\"")},
 								Locations: []*sarif.Location{
 									{
-										Message: &sarif.Message{Text: lo.ToPtr("library/test")},
+										Message: &sarif.Message{Text: lo.ToPtr("library/test 1")},
 										PhysicalLocation: &sarif.PhysicalLocation{
 											ArtifactLocation: &sarif.ArtifactLocation{
-												URI:       lo.ToPtr("library/test"),
+												URI:       lo.ToPtr("library/test%201"),
 												URIBaseId: lo.ToPtr("ROOTPATH"),
 											},
 											Region: &sarif.Region{
@@ -423,7 +428,7 @@ func TestReportWriter_Sarif(t *testing.T) {
 						ColumnKind: "utf16CodeUnits",
 						OriginalUriBaseIDs: map[string]*sarif.ArtifactLocation{
 							"ROOTPATH": {
-								URI: lo.ToPtr("file:///"),
+								URI: lo.ToPtr(tmpScanURI),
 							},
 						},
 					},
@@ -431,7 +436,8 @@ func TestReportWriter_Sarif(t *testing.T) {
 			},
 		},
 		{
-			name: "report with licenses",
+			name:   "report with licenses",
+			target: "/tmp/scan",
 			input: types.Report{
 				Results: types.Results{
 					{
@@ -489,13 +495,13 @@ func TestReportWriter_Sarif(t *testing.T) {
 								RuleID:    lo.ToPtr("alpine-base:GPL-3.0"),
 								RuleIndex: lo.ToPtr(uint(0)),
 								Level:     lo.ToPtr("error"),
-								Message:   sarif.Message{Text: lo.ToPtr("Artifact: OS Packages\nLicense GPL-3.0\nPkgName: restricted\n Classification: alpine-base\n Path: ")},
+								Message:   sarif.Message{Text: lo.ToPtr("Artifact: OS Packages\nLicense GPL-3.0\nPkgName: alpine-base\n Classification: restricted\n Path: ")},
 								Locations: []*sarif.Location{
 									{
 										Message: sarif.NewTextMessage(""),
 										PhysicalLocation: &sarif.PhysicalLocation{
 											ArtifactLocation: &sarif.ArtifactLocation{
-												URI:       lo.ToPtr("OS Packages"),
+												URI:       lo.ToPtr("OS%20Packages"),
 												URIBaseId: lo.ToPtr("ROOTPATH"),
 											},
 											Region: &sarif.Region{
@@ -512,7 +518,7 @@ func TestReportWriter_Sarif(t *testing.T) {
 						ColumnKind: "utf16CodeUnits",
 						OriginalUriBaseIDs: map[string]*sarif.ArtifactLocation{
 							"ROOTPATH": {
-								URI: lo.ToPtr("file:///"),
+								URI: lo.ToPtr(tmpScanURI),
 							},
 						},
 					},
@@ -520,7 +526,8 @@ func TestReportWriter_Sarif(t *testing.T) {
 			},
 		},
 		{
-			name: "no vulns",
+			name:   "no vulns",
+			target: "/tmp/scan",
 			want: &sarif.Report{
 				Version: "2.1.0",
 				Schema:  "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
@@ -539,7 +546,7 @@ func TestReportWriter_Sarif(t *testing.T) {
 						ColumnKind: "utf16CodeUnits",
 						OriginalUriBaseIDs: map[string]*sarif.ArtifactLocation{
 							"ROOTPATH": {
-								URI: lo.ToPtr("file:///"),
+								URI: lo.ToPtr(tmpScanURI),
 							},
 						},
 					},
@@ -578,6 +585,44 @@ func TestReportWriter_Sarif(t *testing.T) {
 										{
 											Resource: "google_project_iam_member.workload_identity_sa_bindings[\"roles/storage.admin\"]",
 											Filename: "git::https:/github.com/terraform-google-modules/terraform-google-kubernetes-engine?ref=c4809044b52b91505bfba5ef9f25526aa0361788/modules/workload-identity/main.tf",
+											Location: ftypes.Location{
+												StartLine: 87,
+												EndLine:   93,
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					{
+						Target: "git@github.com:terraform-aws-modules/terraform-aws-s3-bucket.git?ref=v4.2.0/main.tf",
+						Class:  types.ClassConfig,
+						Type:   ftypes.Terraform,
+						Misconfigurations: []types.DetectedMisconfiguration{
+							{
+								Type:        "Terraform Security Check",
+								ID:          "AVD-GCP-0007",
+								AVDID:       "AVD-GCP-0007",
+								Title:       "Service accounts should not have roles assigned with excessive privileges",
+								Description: "Service accounts should have a minimal set of permissions assigned in order to do their job. They should never have excessive access as if compromised, an attacker can escalate privileges and take over the entire account.",
+								Message:     "Service account is granted a privileged role.",
+								Query:       "data..",
+								Resolution:  "Limit service account access to minimal required set",
+								Severity:    "HIGH",
+								PrimaryURL:  "https://avd.aquasec.com/misconfig/avd-gcp-0007",
+								References: []string{
+									"https://cloud.google.com/iam/docs/understanding-roles",
+									"https://avd.aquasec.com/misconfig/avd-gcp-0007",
+								},
+								Status: "Fail",
+								CauseMetadata: ftypes.CauseMetadata{
+									StartLine: 91,
+									EndLine:   91,
+									Occurrences: []ftypes.Occurrence{
+										{
+											Resource: "google_project_iam_member.workload_identity_sa_bindings[\"roles/storage.admin\"]",
+											Filename: "git@github.com:terraform-aws-modules/terraform-aws-s3-bucket.git?ref=v4.2.0/main.tf",
 											Location: ftypes.Location{
 												StartLine: 87,
 												EndLine:   93,
@@ -655,13 +700,34 @@ func TestReportWriter_Sarif(t *testing.T) {
 									},
 								},
 							},
-						},
-						ColumnKind: "utf16CodeUnits",
-						OriginalUriBaseIDs: map[string]*sarif.ArtifactLocation{
-							"ROOTPATH": {
-								URI: lo.ToPtr("file:///"),
+							{
+								RuleID:    lo.ToPtr("AVD-GCP-0007"),
+								RuleIndex: lo.ToPtr(uint(0)),
+								Level:     lo.ToPtr("error"),
+								Message:   *sarif.NewTextMessage("Artifact: github.com/terraform-aws-modules/terraform-aws-s3-bucket/tree/v4.2.0/main.tf\nType: terraform\nVulnerability AVD-GCP-0007\nSeverity: HIGH\nMessage: Service account is granted a privileged role.\nLink: [AVD-GCP-0007](https://avd.aquasec.com/misconfig/avd-gcp-0007)"),
+								Locations: []*sarif.Location{
+									{
+										PhysicalLocation: sarif.NewPhysicalLocation().
+											WithArtifactLocation(
+												&sarif.ArtifactLocation{
+													URI:       lo.ToPtr("github.com/terraform-aws-modules/terraform-aws-s3-bucket/tree/v4.2.0/main.tf"),
+													URIBaseId: lo.ToPtr("ROOTPATH"),
+												},
+											).
+											WithRegion(
+												&sarif.Region{
+													StartLine:   lo.ToPtr(91),
+													StartColumn: lo.ToPtr(1),
+													EndLine:     lo.ToPtr(91),
+													EndColumn:   lo.ToPtr(1),
+												},
+											),
+										Message: sarif.NewTextMessage("github.com/terraform-aws-modules/terraform-aws-s3-bucket/tree/v4.2.0/main.tf"),
+									},
+								},
 							},
 						},
+						ColumnKind: "utf16CodeUnits",
 					},
 				},
 			},
@@ -673,14 +739,34 @@ func TestReportWriter_Sarif(t *testing.T) {
 			sarifWritten := bytes.NewBuffer(nil)
 			w := report.SarifWriter{
 				Output: sarifWritten,
+				Target: tt.target,
 			}
-			err := w.Write(context.TODO(), tt.input)
+			err := w.Write(t.Context(), tt.input)
 			require.NoError(t, err)
 
 			result := &sarif.Report{}
 			err = json.Unmarshal(sarifWritten.Bytes(), result)
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, result)
+		})
+	}
+}
+
+func TestReportWriter_toSarifErrorLevel(t *testing.T) {
+	tests := []struct {
+		severity        string
+		sarifErrorLevel string
+	}{
+		{severity: "CRITICAL", sarifErrorLevel: "error"},
+		{severity: "HIGH", sarifErrorLevel: "error"},
+		{severity: "MEDIUM", sarifErrorLevel: "warning"},
+		{severity: "LOW", sarifErrorLevel: "note"},
+		{severity: "UNKNOWN", sarifErrorLevel: "note"},
+		{severity: "OTHER", sarifErrorLevel: "none"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.severity, func(t *testing.T) {
+			assert.Equal(t, tc.sarifErrorLevel, report.ToSarifErrorLevel(tc.severity), tc.severity)
 		})
 	}
 }
@@ -723,5 +809,171 @@ func TestToPathUri(t *testing.T) {
 		if got != test.output {
 			t.Errorf("toPathUri(%q) got %q, wanted %q", test.input, got, test.output)
 		}
+	}
+}
+
+func Test_clearURI(t *testing.T) {
+	test := []struct {
+		name string
+		uri  string
+		want string
+	}{
+		{
+			name: "https",
+			uri:  "bitbucket.org/hashicorp/terraform-consul-aws",
+			want: "bitbucket.org/hashicorp/terraform-consul-aws",
+		},
+		{
+			name: "github",
+			uri:  "git@github.com:terraform-aws-modules/terraform-aws-s3-bucket.git?ref=v4.2.0/main.tf",
+			want: "github.com/terraform-aws-modules/terraform-aws-s3-bucket/tree/v4.2.0/main.tf",
+		},
+		{
+			name: "git",
+			uri:  "git::https://example.com/storage.git?ref=51d462976d84fdea54b47d80dcabbf680badcdb8",
+			want: "https://example.com/storage?ref=51d462976d84fdea54b47d80dcabbf680badcdb8",
+		},
+		{
+			name: "git ssh",
+			uri:  "git::ssh://username@example.com/storage.git",
+			want: "example.com/storage",
+		},
+		{
+			name: "hg",
+			uri:  "hg::http://example.com/vpc.hg?ref=v1.2.0",
+			want: "http://example.com/vpc?ref=v1.2.0",
+		},
+		{
+			name: "s3",
+			uri:  "s3::https://s3-eu-west-1.amazonaws.com/examplecorp-terraform-modules/vpc.zip",
+			want: "https://s3-eu-west-1.amazonaws.com/examplecorp-terraform-modules/vpc.zip",
+		},
+		{
+			name: "gcs",
+			uri:  "gcs::https://www.googleapis.com/storage/v1/modules/foomodule.zip",
+			want: "https://www.googleapis.com/storage/v1/modules/foomodule.zip",
+		},
+	}
+
+	for _, tt := range test {
+		t.Run(tt.name, func(t *testing.T) {
+			got := report.ClearURI(tt.uri)
+			require.Equal(t, tt.want, got)
+			require.NotNil(t, report.ToUri(got))
+		})
+	}
+}
+
+func TestMakePropertiesMarshal(t *testing.T) {
+	tests := []struct {
+		name      string
+		title     string
+		severity  string
+		cvssScore string
+		cvssData  map[string]any
+		expected  string
+	}{
+		{
+			name:      "no CVSS data",
+			title:     "test",
+			severity:  "HIGH",
+			cvssScore: "5.0",
+			cvssData:  make(map[string]any),
+			expected: `{
+				"precision": "very-high",
+				"security-severity": "5.0",
+				"tags": ["test", "security", "HIGH"]
+			}`,
+		},
+		{
+			name:      "only CVSS v2",
+			title:     "test",
+			severity:  "CRITICAL",
+			cvssScore: "4.0",
+			cvssData: map[string]any{
+				"cvssv2_vector": "AV:N/AC:L/Au:N/C:P/I:N/A:N",
+				"cvssv2_score":  5.0,
+			},
+			expected: `{
+				"cvssv2_score": 5,
+				"cvssv2_vector": "AV:N/AC:L/Au:N/C:P/I:N/A:N",
+				"precision": "very-high",
+				"security-severity": "4.0",
+				"tags": ["test", "security", "CRITICAL"]
+			}`,
+		},
+		{
+			name:      "only CVSS v3",
+			title:     "test",
+			severity:  "CRITICAL",
+			cvssScore: "9.8",
+			cvssData: map[string]any{
+				"cvssv3_vector":    "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+				"cvssv3_baseScore": 9.8,
+			},
+			expected: `{
+				"cvssv3_baseScore": 9.8,
+				"cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+				"precision": "very-high",
+				"security-severity": "9.8",
+				"tags": ["test", "security", "CRITICAL"]
+			}`,
+		},
+		{
+			name:      "only CVSS v4",
+			title:     "test",
+			severity:  "LOW",
+			cvssScore: "3.5",
+			cvssData: map[string]any{
+				"cvssv40_vector":    "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+				"cvssv40_baseScore": 3.5,
+			},
+			expected: `{
+				"cvssv40_baseScore": 3.5,
+				"cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+				"precision": "very-high",
+				"security-severity": "3.5",
+				"tags": ["test", "security", "LOW"]
+			}`,
+		},
+		{
+			name:      "all CVSS versions",
+			title:     "test",
+			severity:  "HIGH",
+			cvssScore: "8.1",
+			cvssData: map[string]any{
+				"cvssv2_vector":     "AV:N/AC:L/Au:N/C:P/I:P/A:P",
+				"cvssv2_score":      7.5,
+				"cvssv3_vector":     "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+				"cvssv3_baseScore":  9.8,
+				"cvssv40_vector":    "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+				"cvssv40_baseScore": 9.3,
+			},
+			expected: `{
+				"cvssv2_score": 7.5,
+				"cvssv2_vector": "AV:N/AC:L/Au:N/C:P/I:P/A:P",
+				"cvssv3_baseScore": 9.8,
+				"cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+				"cvssv40_baseScore": 9.3,
+				"cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+				"precision": "very-high",
+				"security-severity": "8.1",
+				"tags": ["test", "security", "HIGH"]
+			}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := report.ToProperties(tt.title, tt.severity, tt.cvssScore, tt.cvssData)
+
+			actualJSON, err := json.Marshal(result)
+			require.NoError(t, err)
+
+			var expectedJSON bytes.Buffer
+			err = json.Compact(&expectedJSON, []byte(tt.expected))
+			require.NoError(t, err)
+			assert.JSONEq(t, expectedJSON.String(), string(actualJSON))
+		})
 	}
 }

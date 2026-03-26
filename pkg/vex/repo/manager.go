@@ -66,7 +66,7 @@ func NewManager(cacheRoot string, opts ...ManagerOption) *Manager {
 }
 
 func (m *Manager) writeConfig(conf Config) error {
-	if err := os.MkdirAll(filepath.Dir(m.configFile), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(m.configFile), 0o700); err != nil {
 		return xerrors.Errorf("failed to mkdir: %w", err)
 	}
 	f, err := os.Create(m.configFile)
@@ -163,7 +163,7 @@ func (m *Manager) List(ctx context.Context) error {
 
 	var output strings.Builder
 
-	output.WriteString(fmt.Sprintf("VEX Repositories (config: %s)\n\n", m.configFile))
+	fmt.Fprintf(&output, "VEX Repositories (config: %s)\n\n", m.configFile)
 
 	if len(conf.Repositories) == 0 {
 		output.WriteString("No repositories configured.\n")
@@ -173,7 +173,11 @@ func (m *Manager) List(ctx context.Context) error {
 			if !repo.Enabled {
 				status = "Disabled"
 			}
-			output.WriteString(fmt.Sprintf("- Name: %s\n  URL: %s\n  Status: %s\n\n", repo.Name, repo.URL, status))
+			tlsVerify := ""
+			if repo.Insecure {
+				tlsVerify = "\n  TLS Verify: No"
+			}
+			fmt.Fprintf(&output, "- Name: %s\n  URL: %s\n  Status: %s%s\n\n", repo.Name, repo.URL, status, tlsVerify)
 		}
 	}
 

@@ -1,7 +1,6 @@
 package image
 
 import (
-	"context"
 	"fmt"
 	"net/http/httptest"
 	"testing"
@@ -73,10 +72,9 @@ func TestNewDockerImage(t *testing.T) {
 			wantID:       "sha256:a187dde48cd289ac374ad8539930628314bc581a481cdb41409c9289419ddb72",
 			wantRepoTags: []string{"alpine:3.11"},
 			wantConfigFile: &v1.ConfigFile{
-				Architecture:  "amd64",
-				OS:            "linux",
-				Created:       v1.Time{Time: time.Date(2020, 3, 23, 21, 19, 34, 196162891, time.UTC)},
-				DockerVersion: "18.09.7",
+				Architecture: "amd64",
+				OS:           "linux",
+				Created:      v1.Time{Time: time.Date(2020, 3, 23, 21, 19, 34, 196162891, time.UTC)},
 				History: []v1.History{
 					{
 						Created:    v1.Time{Time: time.Date(2020, 3, 23, 21, 19, 34, 0, time.UTC)},
@@ -102,7 +100,6 @@ func TestNewDockerImage(t *testing.T) {
 				Config: v1.Config{
 					Cmd:         []string{"/bin/sh"},
 					Env:         []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
-					Image:       "sha256:74df73bb19fbfc7fb5ab9a8234b3d98ee2fb92df5b824496679802685205ab8c",
 					ArgsEscaped: true,
 				},
 				OSVersion: "",
@@ -116,10 +113,9 @@ func TestNewDockerImage(t *testing.T) {
 			wantID:       "sha256:a187dde48cd289ac374ad8539930628314bc581a481cdb41409c9289419ddb72",
 			wantRepoTags: []string{"alpine:3.11"},
 			wantConfigFile: &v1.ConfigFile{
-				Architecture:  "amd64",
-				OS:            "linux",
-				Created:       v1.Time{Time: time.Date(2020, 3, 23, 21, 19, 34, 196162891, time.UTC)},
-				DockerVersion: "18.09.7",
+				Architecture: "amd64",
+				OS:           "linux",
+				Created:      v1.Time{Time: time.Date(2020, 3, 23, 21, 19, 34, 196162891, time.UTC)},
 				History: []v1.History{
 					{
 						Created:    v1.Time{Time: time.Date(2020, 3, 23, 21, 19, 34, 0, time.UTC)},
@@ -145,7 +141,6 @@ func TestNewDockerImage(t *testing.T) {
 				Config: v1.Config{
 					Cmd:         []string{"/bin/sh"},
 					Env:         []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
-					Image:       "sha256:74df73bb19fbfc7fb5ab9a8234b3d98ee2fb92df5b824496679802685205ab8c",
 					ArgsEscaped: true,
 				},
 				OSVersion: "",
@@ -164,16 +159,16 @@ func TestNewDockerImage(t *testing.T) {
 			wantConfigFile: &v1.ConfigFile{
 				Architecture:  "amd64",
 				Container:     "7f4a36a667d138b079b5ff059485ff65bfbb5ebc48f24a89f983b918e73f4f28",
-				Created:       v1.Time{Time: time.Date(2020, 1, 23, 16, 53, 06, 686519038, time.UTC)},
+				Created:       v1.Time{Time: time.Date(2020, 1, 23, 16, 53, 6, 686519038, time.UTC)},
 				DockerVersion: "18.06.1-ce",
 				History: []v1.History{
 					{
-						Created:    v1.Time{Time: time.Date(2020, 1, 23, 16, 53, 06, 551172402, time.UTC)},
+						Created:    v1.Time{Time: time.Date(2020, 1, 23, 16, 53, 6, 551172402, time.UTC)},
 						CreatedBy:  "/bin/sh -c #(nop) ADD file:d48cac34fac385cbc1de6adfdd88300f76f9bbe346cd17e64fd834d042a98326 in / ",
 						EmptyLayer: false,
 					},
 					{
-						Created:    v1.Time{Time: time.Date(2020, 1, 23, 16, 53, 06, 686519038, time.UTC)},
+						Created:    v1.Time{Time: time.Date(2020, 1, 23, 16, 53, 6, 686519038, time.UTC)},
 						CreatedBy:  "/bin/sh -c #(nop)  CMD [\"/bin/sh\"]",
 						Comment:    "",
 						EmptyLayer: true,
@@ -223,16 +218,16 @@ func TestNewDockerImage(t *testing.T) {
 			wantConfigFile: &v1.ConfigFile{
 				Architecture:  "amd64",
 				Container:     "7f4a36a667d138b079b5ff059485ff65bfbb5ebc48f24a89f983b918e73f4f28",
-				Created:       v1.Time{Time: time.Date(2020, 1, 23, 16, 53, 06, 686519038, time.UTC)},
+				Created:       v1.Time{Time: time.Date(2020, 1, 23, 16, 53, 6, 686519038, time.UTC)},
 				DockerVersion: "18.06.1-ce",
 				History: []v1.History{
 					{
-						Created:    v1.Time{Time: time.Date(2020, 1, 23, 16, 53, 06, 551172402, time.UTC)},
+						Created:    v1.Time{Time: time.Date(2020, 1, 23, 16, 53, 6, 551172402, time.UTC)},
 						CreatedBy:  "/bin/sh -c #(nop) ADD file:d48cac34fac385cbc1de6adfdd88300f76f9bbe346cd17e64fd834d042a98326 in / ",
 						EmptyLayer: false,
 					},
 					{
-						Created:    v1.Time{Time: time.Date(2020, 1, 23, 16, 53, 06, 686519038, time.UTC)},
+						Created:    v1.Time{Time: time.Date(2020, 1, 23, 16, 53, 6, 686519038, time.UTC)},
 						CreatedBy:  "/bin/sh -c #(nop)  CMD [\"/bin/sh\"]",
 						Comment:    "",
 						EmptyLayer: true,
@@ -275,7 +270,7 @@ func TestNewDockerImage(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.args.option.ImageSources = types.AllImageSources
-			img, cleanup, err := NewContainerImage(context.Background(), tt.args.imageName, tt.args.option)
+			img, cleanup, err := NewContainerImage(t.Context(), tt.args.imageName, tt.args.option)
 			defer cleanup()
 
 			if tt.wantErr {
@@ -393,12 +388,11 @@ func TestNewDockerImageWithPrivateRegistry(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.args.option.ImageSources = types.AllImageSources
-			_, cleanup, err := NewContainerImage(context.Background(), tt.args.imageName, tt.args.option)
+			_, cleanup, err := NewContainerImage(t.Context(), tt.args.imageName, tt.args.option)
 			defer cleanup()
 
 			if tt.wantErr != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.wantErr, err)
+				require.ErrorContains(t, err, tt.wantErr, err)
 			} else {
 				require.NoError(t, err)
 			}
@@ -411,16 +405,18 @@ func TestNewArchiveImage(t *testing.T) {
 		fileName string
 	}
 	tests := []struct {
-		name    string
-		args    args
-		want    v1.Image
-		wantErr string
+		name         string
+		args         args
+		want         v1.Image
+		wantRepoTags []string
+		wantErr      string
 	}{
 		{
 			name: "happy path",
 			args: args{
 				fileName: "../test/testdata/alpine-310.tar.gz",
 			},
+			wantRepoTags: []string{"alpine:3.10"},
 		},
 		{
 			name: "happy path with OCI Image Format",
@@ -488,15 +484,13 @@ func TestNewArchiveImage(t *testing.T) {
 			img, err := NewArchiveImage(tt.args.fileName)
 			switch {
 			case tt.wantErr != "":
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.wantErr, tt.name)
+				require.ErrorContains(t, err, tt.wantErr, tt.name)
 				return
 			default:
 				require.NoError(t, err, tt.name)
 			}
 
-			// archive doesn't support RepoTags and RepoDigests
-			assert.Empty(t, img.RepoTags())
+			assert.Equal(t, tt.wantRepoTags, img.RepoTags())
 			assert.Empty(t, img.RepoDigests())
 		})
 	}
@@ -544,7 +538,7 @@ func TestDockerPlatformArguments(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			imageName := fmt.Sprintf("%s/library/alpine:3.10", serverAddr)
 			tt.args.option.ImageSources = types.AllImageSources
-			_, cleanup, err := NewContainerImage(context.Background(), imageName, tt.args.option)
+			_, cleanup, err := NewContainerImage(t.Context(), imageName, tt.args.option)
 			defer cleanup()
 
 			if tt.wantErr != "" {

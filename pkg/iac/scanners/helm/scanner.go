@@ -3,16 +3,15 @@ package helm
 import (
 	"context"
 	"fmt"
-	"io"
 	"io/fs"
+	"path"
 	"path/filepath"
 	"strings"
-	"sync"
 
-	"github.com/liamg/memoryfs"
+	"helm.sh/helm/v3/pkg/chartutil"
 
 	"github.com/aquasecurity/trivy/pkg/iac/detection"
-	"github.com/aquasecurity/trivy/pkg/iac/framework"
+	"github.com/aquasecurity/trivy/pkg/iac/ignore"
 	"github.com/aquasecurity/trivy/pkg/iac/rego"
 	"github.com/aquasecurity/trivy/pkg/iac/scan"
 	"github.com/aquasecurity/trivy/pkg/iac/scanners"
@@ -21,28 +20,25 @@ import (
 	"github.com/aquasecurity/trivy/pkg/iac/scanners/options"
 	"github.com/aquasecurity/trivy/pkg/iac/types"
 	"github.com/aquasecurity/trivy/pkg/log"
+	"github.com/aquasecurity/trivy/pkg/mapfs"
 )
 
 var _ scanners.FSScanner = (*Scanner)(nil)
 var _ options.ConfigurableScanner = (*Scanner)(nil)
 
 type Scanner struct {
-	mu            sync.Mutex
+	*rego.RegoScannerProvider
 	logger        *log.Logger
 	options       []options.ScannerOption
 	parserOptions []parser.Option
-	regoScanner   *rego.Scanner
 }
-
-func (s *Scanner) SetIncludeDeprecatedChecks(bool)                {}
-func (s *Scanner) SetRegoOnly(bool)                               {}
-func (s *Scanner) SetFrameworks(frameworks []framework.Framework) {}
 
 // New creates a new Scanner
 func New(opts ...options.ScannerOption) *Scanner {
 	s := &Scanner{
-		options: opts,
-		logger:  log.WithPrefix("helm scanner"),
+		RegoScannerProvider: rego.NewRegoScannerProvider(opts...),
+		options:             opts,
+		logger:              log.WithPrefix("helm scanner"),
 	}
 
 	for _, option := range opts {
@@ -59,14 +55,9 @@ func (s *Scanner) Name() string {
 	return "Helm"
 }
 
-func (s *Scanner) ScanFS(ctx context.Context, target fs.FS, path string) (scan.Results, error) {
-
-	if err := s.initRegoScanner(target); err != nil {
-		return nil, fmt.Errorf("failed to init rego scanner: %w", err)
-	}
-
+func (s *Scanner) ScanFS(ctx context.Context, fsys fs.FS, dir string) (scan.Results, error) {
 	var results []scan.Result
-	if err := fs.WalkDir(target, path, func(path string, d fs.DirEntry, err error) error {
+	if err := fs.WalkDir(fsys, dir, func(filePath string, d fs.DirEntry, err error) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -81,16 +72,14 @@ func (s *Scanner) ScanFS(ctx context.Context, target fs.FS, path string) (scan.R
 			return nil
 		}
 
-		if detection.IsArchive(path) {
-			if scanResults, err := s.getScanResults(path, ctx, target); err != nil {
+		if detection.IsArchive(filePath) {
+			scanResults, err := s.getScanResults(ctx, filePath, fsys)
+			if err != nil {
 				return err
-			} else {
-				results = append(results, scanResults...)
 			}
-		}
-
-		if strings.HasSuffix(path, "Chart.yaml") {
-			if scanResults, err := s.getScanResults(filepath.Dir(path), ctx, target); err != nil {
+			results = append(results, scanResults...)
+		} else if path.Base(filePath) == chartutil.ChartfileName {
+			if scanResults, err := s.getScanResults(ctx, filepath.Dir(filePath), fsys); err != nil {
 				return err
 			} else {
 				results = append(results, scanResults...)
@@ -107,7 +96,7 @@ func (s *Scanner) ScanFS(ctx context.Context, target fs.FS, path string) (scan.R
 
 }
 
-func (s *Scanner) getScanResults(path string, ctx context.Context, target fs.FS) (results []scan.Result, err error) {
+func (s *Scanner) getScanResults(ctx context.Context, path string, target fs.FS) (results []scan.Result, err error) {
 	helmParser, err := parser.New(path, s.parserOptions...)
 	if err != nil {
 		return nil, err
@@ -126,54 +115,44 @@ func (s *Scanner) getScanResults(path string, ctx context.Context, target fs.FS)
 		return nil, nil
 	}
 
+	rs, err := s.InitRegoScanner(target, s.options)
+	if err != nil {
+		return nil, fmt.Errorf("init rego scanner: %w", err)
+	}
+
 	for _, file := range chartFiles {
-		file := file
 		s.logger.Debug("Processing rendered chart file", log.FilePath(file.TemplateFilePath))
 
-		manifests, err := kparser.New().Parse(strings.NewReader(file.ManifestContent), file.TemplateFilePath)
+		ignoreRules := ignore.Parse(file.ManifestContent, file.TemplateFilePath, helmParser.ChartSource)
+		manifests, err := kparser.Parse(ctx, strings.NewReader(file.ManifestContent), file.TemplateFilePath)
 		if err != nil {
 			return nil, fmt.Errorf("unmarshal yaml: %w", err)
 		}
+
+		manifestFS := mapfs.New()
+		if err := manifestFS.MkdirAll(filepath.Dir(file.TemplateFilePath), fs.ModePerm); err != nil {
+			return nil, err
+		}
+		if err := manifestFS.WriteVirtualFile(file.TemplateFilePath, []byte(file.ManifestContent), fs.ModePerm); err != nil {
+			return nil, err
+		}
+
 		for _, manifest := range manifests {
-			fileResults, err := s.regoScanner.ScanInput(ctx, rego.Input{
+			fileResults, err := rs.ScanInput(ctx, types.SourceKubernetes, rego.Input{
 				Path:     file.TemplateFilePath,
-				Contents: manifest,
-				FS:       target,
+				Contents: manifest.ToRego(),
+				FS:       manifestFS,
 			})
 			if err != nil {
 				return nil, fmt.Errorf("scanning error: %w", err)
 			}
 
-			if len(fileResults) > 0 {
-				renderedFS := memoryfs.New()
-				if err := renderedFS.MkdirAll(filepath.Dir(file.TemplateFilePath), fs.ModePerm); err != nil {
-					return nil, err
-				}
-				if err := renderedFS.WriteLazyFile(file.TemplateFilePath, func() (io.Reader, error) {
-					return strings.NewReader(file.ManifestContent), nil
-				}, fs.ModePerm); err != nil {
-					return nil, err
-				}
-				fileResults.SetSourceAndFilesystem(helmParser.ChartSource, renderedFS, detection.IsArchive(helmParser.ChartSource))
-			}
+			fileResults.SetSourceAndFilesystem(helmParser.ChartSource, manifestFS, detection.IsArchive(helmParser.ChartSource))
+			fileResults.Ignore(ignoreRules, nil)
 
 			results = append(results, fileResults...)
 		}
 
 	}
 	return results, nil
-}
-
-func (s *Scanner) initRegoScanner(srcFS fs.FS) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.regoScanner != nil {
-		return nil
-	}
-	regoScanner := rego.NewScanner(types.SourceKubernetes, s.options...)
-	if err := regoScanner.LoadPolicies(srcFS); err != nil {
-		return err
-	}
-	s.regoScanner = regoScanner
-	return nil
 }

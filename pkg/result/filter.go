@@ -8,13 +8,15 @@ import (
 	"slices"
 	"sort"
 
-	"github.com/open-policy-agent/opa/rego"
+	"github.com/open-policy-agent/opa/v1/ast"
+	"github.com/open-policy-agent/opa/v1/rego"
 	"github.com/samber/lo"
 	"golang.org/x/xerrors"
 
 	dbTypes "github.com/aquasecurity/trivy-db/pkg/types"
 	"github.com/aquasecurity/trivy/pkg/types"
 	"github.com/aquasecurity/trivy/pkg/vex"
+	xslices "github.com/aquasecurity/trivy/pkg/x/slices"
 )
 
 const (
@@ -60,9 +62,7 @@ func Filter(ctx context.Context, report types.Report, opts FilterOptions) error 
 // FilterResult filters out the result
 func FilterResult(ctx context.Context, result *types.Result, ignoreConf IgnoreConfig, opt FilterOptions) error {
 	// Convert dbTypes.Severity to string
-	severities := lo.Map(opt.Severities, func(s dbTypes.Severity, _ int) string {
-		return s.String()
-	})
+	severities := xslices.Map(opt.Severities, dbTypes.Severity.String)
 
 	filterVulnerabilities(result, severities, opt.IgnoreStatuses, ignoreConf)
 	filterMisconfigurations(result, severities, opt.IncludeNonFailures, ignoreConf)
@@ -70,7 +70,8 @@ func FilterResult(ctx context.Context, result *types.Result, ignoreConf IgnoreCo
 	filterLicenses(result, severities, opt.IgnoreLicenses, ignoreConf)
 
 	if opt.PolicyFile != "" {
-		if err := applyPolicy(ctx, result, opt.PolicyFile); err != nil {
+		policyFile := filepath.ToSlash(filepath.Clean(opt.PolicyFile))
+		if err := applyPolicy(ctx, result, policyFile); err != nil {
 			return xerrors.Errorf("failed to apply the policy: %w", err)
 		}
 	}
@@ -103,7 +104,7 @@ func filterVulnerabilities(result *types.Result, severities []string, ignoreStat
 		}
 
 		// Check if there is a duplicate vulnerability
-		key := fmt.Sprintf("%s/%s/%s/%s", vuln.VulnerabilityID, vuln.PkgName, vuln.InstalledVersion, vuln.PkgPath)
+		key := fmt.Sprintf("%s/%s/%s/%s/%s", vuln.VulnerabilityID, vuln.PkgID, vuln.PkgName, vuln.InstalledVersion, vuln.PkgPath)
 		if old, ok := uniqVulns[key]; ok && !shouldOverwrite(old, vuln) {
 			continue
 		}
@@ -129,15 +130,18 @@ func filterMisconfigurations(result *types.Result, severities []string, includeN
 		}
 
 		// Filter by ignore file
-		if f := ignoreConfig.MatchMisconfiguration(misconf.ID, misconf.AVDID, result.Target); f != nil {
-			result.MisconfSummary.Exceptions++
+		ids := append([]string{
+			misconf.ID,
+			misconf.AVDID,
+		}, misconf.Aliases...)
+		if f := ignoreConfig.MatchMisconfiguration(ids, result.Target); f != nil {
 			result.ModifiedFindings = append(result.ModifiedFindings,
 				types.NewModifiedFinding(misconf, types.FindingStatusIgnored, f.Statement, ignoreConfig.FilePath))
 			continue
 		}
 
-		// Count successes, failures, and exceptions
-		summarize(misconf.Status, result.MisconfSummary)
+		// Count successes and failures
+		updateMisconfSummary(misconf.Status, result.MisconfSummary)
 
 		if misconf.Status != types.MisconfStatusFailure && !includeNonFailures {
 			continue
@@ -204,14 +208,12 @@ func filterLicenses(result *types.Result, severities, ignoreLicenseNames []strin
 	result.Licenses = filtered
 }
 
-func summarize(status types.MisconfStatus, summary *types.MisconfSummary) {
+func updateMisconfSummary(status types.MisconfStatus, summary *types.MisconfSummary) {
 	switch status {
 	case types.MisconfStatusFailure:
 		summary.Failures++
 	case types.MisconfStatusPassed:
 		summary.Successes++
-	case types.MisconfStatusException:
-		summary.Exceptions++
 	}
 }
 
@@ -225,89 +227,93 @@ func applyPolicy(ctx context.Context, result *types.Result, policyFile string) e
 		rego.Query("data.trivy.ignore"),
 		rego.Module("lib.rego", module),
 		rego.Module("trivy.rego", string(policy)),
+		rego.SetRegoVersion(ast.RegoV0),
 	).PrepareForEval(ctx)
 	if err != nil {
 		return xerrors.Errorf("unable to prepare for eval: %w", err)
 	}
 
-	policyFile = filepath.ToSlash(filepath.Clean(policyFile))
-
 	// Vulnerabilities
-	var filteredVulns []types.DetectedVulnerability
-	for _, vuln := range result.Vulnerabilities {
-		ignored, err := evaluate(ctx, query, vuln)
-		if err != nil {
-			return err
-		}
-		if ignored {
-			result.ModifiedFindings = append(result.ModifiedFindings,
-				types.NewModifiedFinding(vuln, types.FindingStatusIgnored, "Filtered by Rego", policyFile))
-			continue
-		}
-		filteredVulns = append(filteredVulns, vuln)
+	filteredVulns, modifiedVulns, err := filterFindingsByRego(ctx, query, result.Vulnerabilities, policyFile)
+	if err != nil {
+		return err
 	}
 	result.Vulnerabilities = filteredVulns
+	result.ModifiedFindings = append(result.ModifiedFindings, modifiedVulns...)
 
 	// Misconfigurations
-	var filteredMisconfs []types.DetectedMisconfiguration
-	for _, misconf := range result.Misconfigurations {
-		ignored, err := evaluate(ctx, query, misconf)
-		if err != nil {
-			return err
-		}
-		if ignored {
-			result.MisconfSummary.Exceptions++
-			switch misconf.Status {
-			case types.MisconfStatusFailure:
-				result.MisconfSummary.Failures--
-			case types.MisconfStatusPassed:
-				result.MisconfSummary.Successes--
-			}
-			result.ModifiedFindings = append(result.ModifiedFindings,
-				types.NewModifiedFinding(misconf, types.FindingStatusIgnored, "Filtered by Rego", policyFile))
+	filteredMisconfs, modifiedMisconfs, err := filterFindingsByRego(ctx, query, result.Misconfigurations, policyFile)
+	if err != nil {
+		return err
+	}
+
+	for _, m := range modifiedMisconfs {
+		misconf, ok := m.Finding.(types.DetectedMisconfiguration)
+		if !ok {
 			continue
 		}
-		filteredMisconfs = append(filteredMisconfs, misconf)
+		switch misconf.Status {
+		case types.MisconfStatusFailure:
+			result.MisconfSummary.Failures--
+		case types.MisconfStatusPassed:
+			result.MisconfSummary.Successes--
+		}
 	}
+
 	result.Misconfigurations = filteredMisconfs
+	result.ModifiedFindings = append(result.ModifiedFindings, modifiedMisconfs...)
 
 	// Secrets
-	var filteredSecrets []types.DetectedSecret
-	for _, scrt := range result.Secrets {
-		ignored, err := evaluate(ctx, query, scrt)
-		if err != nil {
-			return err
-		}
-		if ignored {
-			result.ModifiedFindings = append(result.ModifiedFindings,
-				types.NewModifiedFinding(scrt, types.FindingStatusIgnored, "Filtered by Rego", policyFile))
-			continue
-		}
-		filteredSecrets = append(filteredSecrets, scrt)
+	filteredSecrets, modifiedSecrets, err := filterFindingsByRego(ctx, query, result.Secrets, policyFile)
+	if err != nil {
+		return err
 	}
 	result.Secrets = filteredSecrets
+	result.ModifiedFindings = append(result.ModifiedFindings, modifiedSecrets...)
 
 	// Licenses
-	var filteredLicenses []types.DetectedLicense
-	for _, lic := range result.Licenses {
-		ignored, err := evaluate(ctx, query, lic)
-		if err != nil {
-			return err
-		}
-		if ignored {
-			result.ModifiedFindings = append(result.ModifiedFindings,
-				types.NewModifiedFinding(lic, types.FindingStatusIgnored, "Filtered by Rego", policyFile))
-			continue
-		}
-		filteredLicenses = append(filteredLicenses, lic)
+	filteredLicenses, modifiedLicenses, err := filterFindingsByRego(ctx, query, result.Licenses, policyFile)
+	if err != nil {
+		return err
 	}
 	result.Licenses = filteredLicenses
-
+	result.ModifiedFindings = append(result.ModifiedFindings, modifiedLicenses...)
 	return nil
 }
 
-func evaluate(ctx context.Context, query rego.PreparedEvalQuery, input any) (bool, error) {
-	results, err := query.Eval(ctx, rego.EvalInput(input))
+func filterFindingsByRego[T types.Finding](
+	ctx context.Context, query rego.PreparedEvalQuery, findings []T, policyFile string,
+) ([]T, []types.ModifiedFinding, error) {
+	var filtered []T
+	var modified []types.ModifiedFinding
+
+	for _, finding := range findings {
+		ignored, err := evaluate(ctx, query, finding)
+		if err != nil {
+			return nil, nil, err
+		}
+		if ignored {
+			modified = append(modified,
+				types.NewModifiedFinding(finding, types.FindingStatusIgnored, "Filtered by Rego", policyFile))
+			continue
+		}
+		filtered = append(filtered, finding)
+	}
+	return filtered, modified, nil
+}
+
+func evaluate[T types.Finding](ctx context.Context, query rego.PreparedEvalQuery, finding T) (bool, error) {
+	type regoInput struct {
+		Data T      `json:",inline"`
+		Type string `json:"Type"`
+	}
+
+	ri := regoInput{
+		Data: finding,
+		Type: string(finding.FindingType()),
+	}
+
+	results, err := query.Eval(ctx, rego.EvalInput(ri))
 	if err != nil {
 		return false, xerrors.Errorf("unable to evaluate the policy: %w", err)
 	} else if len(results) == 0 {

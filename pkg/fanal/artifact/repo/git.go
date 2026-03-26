@@ -1,47 +1,34 @@
 package repo
 
 import (
-	"context"
 	"net/url"
 	"os"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
-	"github.com/google/wire"
 	"github.com/hashicorp/go-multierror"
 	"golang.org/x/xerrors"
 
 	"github.com/aquasecurity/trivy/pkg/cache"
 	"github.com/aquasecurity/trivy/pkg/fanal/artifact"
 	"github.com/aquasecurity/trivy/pkg/fanal/artifact/local"
+	"github.com/aquasecurity/trivy/pkg/fanal/types"
 	"github.com/aquasecurity/trivy/pkg/fanal/walker"
+	xos "github.com/aquasecurity/trivy/pkg/x/os"
 )
 
-var (
-	ArtifactSet = wire.NewSet(
-		walker.NewFS,
-		wire.Bind(new(Walker), new(*walker.FS)),
-		NewArtifact,
-	)
-
-	_ Walker = (*walker.FS)(nil)
-)
+var _ Walker = (*walker.FS)(nil)
 
 type Walker interface {
 	Walk(root string, opt walker.Option, fn walker.WalkFunc) error
 }
 
-type Artifact struct {
-	url   string
-	local artifact.Artifact
-}
-
-func NewArtifact(target string, c cache.ArtifactCache, w Walker, artifactOpt artifact.Option) (
-	artifact.Artifact, func(), error) {
-
+func NewArtifact(target string, c cache.ArtifactCache, w Walker, artifactOpt artifact.Option) (artifact.Artifact, func(), error) {
 	var cleanup func()
 	var errs error
+
+	artifactOpt.Type = types.TypeRepository
 
 	// Try the local repository
 	art, err := tryLocalRepo(target, c, w, artifactOpt)
@@ -61,24 +48,6 @@ func NewArtifact(target string, c cache.ArtifactCache, w Walker, artifactOpt art
 	return nil, cleanup, errs
 }
 
-func (a Artifact) Inspect(ctx context.Context) (artifact.Reference, error) {
-	ref, err := a.local.Inspect(ctx)
-	if err != nil {
-		return artifact.Reference{}, xerrors.Errorf("remote repository error: %w", err)
-	}
-
-	if a.url != "" {
-		ref.Name = a.url
-	}
-	ref.Type = artifact.TypeRepository
-
-	return ref, nil
-}
-
-func (Artifact) Clean(_ artifact.Reference) error {
-	return nil
-}
-
 func tryLocalRepo(target string, c cache.ArtifactCache, w Walker, artifactOpt artifact.Option) (artifact.Artifact, error) {
 	if _, err := os.Stat(target); err != nil {
 		return nil, xerrors.Errorf("no such path: %w", err)
@@ -88,9 +57,7 @@ func tryLocalRepo(target string, c cache.ArtifactCache, w Walker, artifactOpt ar
 	if err != nil {
 		return nil, xerrors.Errorf("local repo artifact error: %w", err)
 	}
-	return Artifact{
-		local: art,
-	}, nil
+	return art, nil
 }
 
 func tryRemoteRepo(target string, c cache.ArtifactCache, w Walker, artifactOpt artifact.Option) (artifact.Artifact, func(), error) {
@@ -107,20 +74,18 @@ func tryRemoteRepo(target string, c cache.ArtifactCache, w Walker, artifactOpt a
 
 	cleanup = func() { _ = os.RemoveAll(tmpDir) }
 
+	artifactOpt.Original = target
 	art, err := local.NewArtifact(tmpDir, c, w, artifactOpt)
 	if err != nil {
 		return nil, cleanup, xerrors.Errorf("fs artifact: %w", err)
 	}
 
-	return Artifact{
-		url:   target,
-		local: art,
-	}, cleanup, nil
+	return art, cleanup, nil
 
 }
 
 func cloneRepo(u *url.URL, artifactOpt artifact.Option) (string, error) {
-	tmpDir, err := os.MkdirTemp("", "trivy-remote-repo")
+	tmpDir, err := xos.MkdirTemp("", "git-clone-")
 	if err != nil {
 		return "", xerrors.Errorf("failed to create a temp dir: %w", err)
 	}
@@ -128,7 +93,7 @@ func cloneRepo(u *url.URL, artifactOpt artifact.Option) (string, error) {
 	cloneOptions := git.CloneOptions{
 		URL:             u.String(),
 		Auth:            gitAuth(),
-		Progress:        os.Stdout,
+		Progress:        os.Stderr,
 		InsecureSkipTLS: artifactOpt.Insecure,
 	}
 
@@ -189,30 +154,26 @@ func newURL(rawurl string) (*url.URL, error) {
 
 // Helper function to check for a GitHub/GitLab token from env vars in order to
 // make authenticated requests to access private repos
-func gitAuth() *http.BasicAuth {
-	var auth *http.BasicAuth
-
+func gitAuth() http.AuthMethod {
 	// The username can be anything for HTTPS Git operations
 	gitUsername := "fanal-aquasecurity-scan"
 
 	// We first check if a GitHub token was provided
 	githubToken := os.Getenv("GITHUB_TOKEN")
 	if githubToken != "" {
-		auth = &http.BasicAuth{
+		return &http.BasicAuth{
 			Username: gitUsername,
 			Password: githubToken,
 		}
-		return auth
 	}
 
 	// Otherwise we check if a GitLab token was provided
 	gitlabToken := os.Getenv("GITLAB_TOKEN")
 	if gitlabToken != "" {
-		auth = &http.BasicAuth{
+		return &http.BasicAuth{
 			Username: gitUsername,
 			Password: gitlabToken,
 		}
-		return auth
 	}
 
 	// If no token was provided, we simply return a nil,

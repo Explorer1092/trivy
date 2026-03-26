@@ -3,6 +3,7 @@ package cyclonedx
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 
@@ -79,14 +80,27 @@ func (b *BOM) parseBOM(bom *cdx.BOM) error {
 		if !ok {
 			continue
 		}
-		for _, depRef := range lo.FromPtr(dep.Dependencies) {
-			dependency, ok := components[depRef]
-			if !ok {
-				continue
+
+		dependencies := lo.FromPtr(dep.Dependencies)
+		if len(dependencies) == 0 {
+			// Empty dependsOn array - create empty relationship to preserve this information
+			b.BOM.AddRelationship(ref, nil, core.RelationshipDependsOn)
+		} else {
+			// Process actual dependencies
+			for _, depRef := range dependencies {
+				dependency, ok := components[depRef]
+				if !ok {
+					continue
+				}
+				b.BOM.AddRelationship(ref, dependency, core.RelationshipDependsOn)
 			}
-			b.BOM.AddRelationship(ref, dependency, core.RelationshipDependsOn)
 		}
 	}
+
+	if refs := b.parseExternalReferences(bom); refs != nil {
+		b.BOM.AddExternalReferences(refs)
+	}
+
 	return nil
 }
 
@@ -101,6 +115,39 @@ func (b *BOM) parseMetadataComponent(bom *cdx.BOM) (*core.Component, error) {
 	root.Root = true
 	b.BOM.AddComponent(root)
 	return root, nil
+}
+
+func (b *BOM) parseExternalReferences(bom *cdx.BOM) []core.ExternalReference {
+	if bom.ExternalReferences == nil {
+		return nil
+	}
+	var refs = make([]core.ExternalReference, 0)
+
+	for _, ref := range *bom.ExternalReferences {
+		t, err := b.unmarshalReferenceType(ref.Type)
+		if err != nil {
+			continue
+		}
+
+		externalReference := core.ExternalReference{
+			Type: t,
+			URL:  ref.URL,
+		}
+
+		refs = append(refs, externalReference)
+	}
+	return refs
+}
+
+func (b *BOM) unmarshalReferenceType(t cdx.ExternalReferenceType) (core.ExternalReferenceType, error) {
+	var referenceType core.ExternalReferenceType
+	switch t {
+	case cdx.ERTypeExploitabilityStatement:
+		referenceType = core.ExternalReferenceVEX
+	default:
+		return "", fmt.Errorf("unsupported external reference type: %s", t)
+	}
+	return referenceType, nil
 }
 
 func (b *BOM) parseComponents(cdxComponents *[]cdx.Component) map[string]*core.Component {
@@ -176,6 +223,8 @@ func (b *BOM) unmarshalType(t cdx.ComponentType) (core.ComponentType, error) {
 		ctype = core.TypeOS
 	case cdx.ComponentTypePlatform:
 		ctype = core.TypePlatform
+	case cdx.ComponentTypeFile:
+		ctype = core.TypeFilesystem
 	default:
 		return "", ErrUnsupportedType
 	}
@@ -218,6 +267,8 @@ func (b *BOM) unmarshalHashes(hashes *[]cdx.Hash) []digest.Digest {
 			alg = digest.SHA1
 		case cdx.HashAlgoSHA256:
 			alg = digest.SHA256
+		case cdx.HashAlgoSHA512:
+			alg = digest.SHA512
 		case cdx.HashAlgoMD5:
 			alg = digest.MD5
 		default:
@@ -238,10 +289,21 @@ func (b *BOM) unmarshalSupplier(supplier *cdx.OrganizationalEntity) string {
 func (b *BOM) unmarshalProperties(properties *[]cdx.Property) []core.Property {
 	var props []core.Property
 	for _, p := range lo.FromPtr(properties) {
-		props = append(props, core.Property{
-			Name:  strings.TrimPrefix(p.Name, Namespace),
+		prop := core.Property{
 			Value: p.Value,
-		})
+		}
+
+		// If the property has the Trivy namespace prefix, it's a Trivy property
+		if name, found := strings.CutPrefix(p.Name, Namespace); found {
+			prop.Name = name
+			prop.External = false // Trivy property (default)
+		} else {
+			// External property - preserve the original name and mark as external
+			prop.Name = p.Name
+			prop.External = true
+		}
+
+		props = append(props, prop)
 	}
 	return props
 }

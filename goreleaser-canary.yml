@@ -3,7 +3,7 @@ version: 2
 project_name: trivy_canary_build
 builds:
   -
-    main: cmd/trivy/main.go
+    main: ./cmd/trivy/
     binary: trivy
     ldflags:
       - -s -w
@@ -11,6 +11,7 @@ builds:
       - -X github.com/aquasecurity/trivy/pkg/version/app.ver={{.Version}}
     env:
       - CGO_ENABLED=0
+      - GOEXPERIMENT=jsonv2
     goos:
       - darwin
       - linux

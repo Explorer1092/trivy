@@ -1,5 +1,18 @@
 package expression
 
+import (
+	"encoding/json"
+	"strings"
+	"sync"
+
+	"github.com/samber/lo"
+
+	"github.com/aquasecurity/trivy/pkg/log"
+	"github.com/aquasecurity/trivy/pkg/set"
+
+	_ "embed"
+)
+
 // Canonical names of the licenses.
 // ported from https://github.com/google/licenseclassifier/blob/7c62d6fe8d3aa2f39c4affb58c9781d9dc951a2d/license_type.go#L24-L177
 const (
@@ -24,7 +37,7 @@ const (
 	Artistic10                  = "Artistic-1.0"
 	Artistic20                  = "Artistic-2.0"
 	BCL                         = "BCL"
-	Beerware                    = "Beerware"
+	BSD1Clause                  = "BSD-1-Clause"
 	BSD2ClauseFreeBSD           = "BSD-2-Clause-FreeBSD"
 	BSD2ClauseNetBSD            = "BSD-2-Clause-NetBSD"
 	BSD2Clause                  = "BSD-2-Clause"
@@ -72,7 +85,6 @@ const (
 	CommonsClause               = "Commons-Clause"
 	CPAL10                      = "CPAL-1.0"
 	CPL10                       = "CPL-1.0"
-	EGenix                      = "eGenix"
 	EPL10                       = "EPL-1.0"
 	EPL20                       = "EPL-2.0"
 	EUPL10                      = "EUPL-1.0"
@@ -108,13 +120,11 @@ const (
 	LGPL20                      = "LGPL-2.0"
 	LGPL21                      = "LGPL-2.1"
 	LGPL30                      = "LGPL-3.0"
-	LGPLLR                      = "LGPLLR"
 	Libpng                      = "Libpng"
 	Lil10                       = "Lil-1.0"
 	LinuxOpenIB                 = "Linux-OpenIB"
 	LPL102                      = "LPL-1.02"
 	LPL10                       = "LPL-1.0"
-	LPPL13c                     = "LPPL-1.3c"
 	MIT                         = "MIT"
 	MPL10                       = "MPL-1.0"
 	MPL11                       = "MPL-1.1"
@@ -142,7 +152,6 @@ const (
 	SGIB10                      = "SGI-B-1.0"
 	SGIB11                      = "SGI-B-1.1"
 	SGIB20                      = "SGI-B-2.0"
-	SISSL12                     = "SISSL-1.2"
 	SISSL                       = "SISSL"
 	Sleepycat                   = "Sleepycat"
 	UnicodeTOU                  = "Unicode-TOU"
@@ -293,6 +302,7 @@ var (
 		Artistic10,
 		Artistic20,
 		BSL10,
+		BSD1Clause,
 		BSD2ClauseFreeBSD,
 		BSD2ClauseNetBSD,
 		BSD2Clause,
@@ -359,3 +369,65 @@ var (
 		ZeroBSD,
 	}
 )
+
+var spdxLicenses = set.NewCaseInsensitive()
+
+//go:embed licenses.json
+var licenses []byte
+
+var initSpdxLicenses = sync.OnceFunc(func() {
+	if spdxLicenses.Size() > 0 {
+		return
+	}
+
+	var lics []string
+	if err := json.Unmarshal(licenses, &lics); err != nil {
+		log.WithPrefix(log.PrefixSPDX).Warn("Unable to parse SPDX license file", log.Err(err))
+		return
+	}
+
+	// SPDX license list is case-insensitive.
+	spdxLicenses.Append(lics...)
+})
+
+//go:embed exceptions.json
+var exceptions []byte
+
+var spdxExceptions map[string]SimpleExpr
+
+var initSpdxExceptions = sync.OnceFunc(func() {
+	if len(spdxExceptions) > 0 {
+		return
+	}
+
+	var exs []string
+	if err := json.Unmarshal(exceptions, &exs); err != nil {
+		log.WithPrefix(log.PrefixSPDX).Warn("Unable to parse SPDX exception file", log.Err(err))
+		return
+	}
+	spdxExceptions = lo.SliceToMap(exs, func(exception string) (string, SimpleExpr) {
+		return strings.ToUpper(exception), SimpleExpr{License: exception}
+	})
+})
+
+// ValidateSPDXLicense returns true if SPDX license list contain licenseID
+func ValidateSPDXLicense(license string) bool {
+	initSpdxLicenses()
+
+	return spdxLicenses.Contains(license)
+}
+
+// SPDXLicenseID returns the canonical (properly cased) SPDX license ID.
+// Returns empty string and false if the license is not in the SPDX list
+func SPDXLicenseID(license string) (string, bool) {
+	initSpdxLicenses()
+	return spdxLicenses.Find(license)
+}
+
+// ValidateSPDXException returns true if SPDX exception list contain exceptionID
+func ValidateSPDXException(exception string) bool {
+	initSpdxExceptions()
+
+	_, ok := spdxExceptions[strings.ToUpper(exception)]
+	return ok
+}

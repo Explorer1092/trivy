@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	dimage "github.com/docker/docker/api/types/image"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	dimage "github.com/moby/moby/api/types/image"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -60,7 +60,7 @@ func Test_image_ConfigName(t *testing.T) {
 			ref, err := name.ParseReference(tt.imageName)
 			require.NoError(t, err)
 
-			img, cleanup, err := DockerImage(ref, "")
+			img, cleanup, err := DockerImage(t.Context(), ref, "")
 			require.NoError(t, err)
 			defer cleanup()
 
@@ -84,10 +84,8 @@ func Test_image_ConfigNameWithCustomDockerHost(t *testing.T) {
 	var dockerHostParam string
 
 	if runtime.GOOS != "windows" {
-		runtimeDir, err := os.MkdirTemp("", "daemon")
+		dir, err := os.MkdirTemp("", "image") //nolint:usetesting // Too long file paths created by t.TempDir() cause an invalid argument error with socket binding
 		require.NoError(t, err)
-
-		dir := filepath.Join(runtimeDir, "image")
 		err = os.MkdirAll(dir, os.ModePerm)
 		require.NoError(t, err)
 
@@ -103,7 +101,7 @@ func Test_image_ConfigNameWithCustomDockerHost(t *testing.T) {
 		dockerHostParam = te.Listener.Addr().Network() + "://" + te.Listener.Addr().String()
 	}
 
-	img, cleanup, err := DockerImage(ref, dockerHostParam)
+	img, cleanup, err := DockerImage(t.Context(), ref, dockerHostParam)
 	require.NoError(t, err)
 	defer cleanup()
 
@@ -130,10 +128,8 @@ func Test_image_ConfigNameWithCustomPodmanHost(t *testing.T) {
 		},
 	}
 
-	runtimeDir, err := os.MkdirTemp("", "daemon")
+	dir, err := os.MkdirTemp("", "image") //nolint:usetesting // Too long file paths created by t.TempDir() cause an invalid argument error with socket binding
 	require.NoError(t, err)
-
-	dir := filepath.Join(runtimeDir, "image")
 	err = os.MkdirAll(dir, os.ModePerm)
 	require.NoError(t, err)
 
@@ -143,7 +139,7 @@ func Test_image_ConfigNameWithCustomPodmanHost(t *testing.T) {
 	te := engine.NewDockerEngine(eo)
 	defer te.Close()
 
-	img, cleanup, err := PodmanImage(ref.Name(), podmanSocket)
+	img, cleanup, err := PodmanImage(t.Context(), ref.Name(), podmanSocket)
 	require.NoError(t, err)
 	defer cleanup()
 
@@ -166,10 +162,9 @@ func Test_image_ConfigFile(t *testing.T) {
 			name:      "one diff_id",
 			imageName: "alpine:3.11",
 			want: &v1.ConfigFile{
-				Architecture:  "amd64",
-				OS:            "linux",
-				Created:       v1.Time{Time: time.Date(2020, 3, 23, 21, 19, 34, 196162891, time.UTC)},
-				DockerVersion: "18.09.7",
+				Architecture: "amd64",
+				OS:           "linux",
+				Created:      v1.Time{Time: time.Date(2020, 3, 23, 21, 19, 34, 196162891, time.UTC)},
 				History: []v1.History{
 					{
 						Created:    v1.Time{Time: time.Date(2020, 3, 23, 21, 19, 34, 0, time.UTC)},
@@ -194,7 +189,6 @@ func Test_image_ConfigFile(t *testing.T) {
 				},
 				Config: v1.Config{
 					Cmd:         []string{"/bin/sh"},
-					Image:       "sha256:74df73bb19fbfc7fb5ab9a8234b3d98ee2fb92df5b824496679802685205ab8c",
 					Env:         []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
 					ArgsEscaped: true,
 				},
@@ -229,7 +223,12 @@ func Test_image_ConfigFile(t *testing.T) {
 						{Algorithm: "sha256", Hex: "f47163e8de57e3e3ccfe89d5dfbd9c252d9eca53dc7906b8db60eddcb876c592"},
 					},
 				},
-				Config:    v1.Config{Env: []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt"}},
+				Config: v1.Config{
+					Env: []string{
+						"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+						"SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
+					},
+				},
 				OSVersion: "",
 			},
 			wantErr: false,
@@ -240,7 +239,7 @@ func Test_image_ConfigFile(t *testing.T) {
 			ref, err := name.ParseReference(tt.imageName)
 			require.NoError(t, err)
 
-			img, cleanup, err := DockerImage(ref, "")
+			img, cleanup, err := DockerImage(t.Context(), ref, "")
 			require.NoError(t, err)
 			defer cleanup()
 
@@ -264,19 +263,23 @@ func Test_image_LayerByDiffID(t *testing.T) {
 		{
 			name:      "happy path",
 			imageName: "alpine:3.10",
-			args: args{h: v1.Hash{
-				Algorithm: "sha256",
-				Hex:       "531743b7098cb2aaf615641007a129173f63ed86ca32fe7b5a246a1c47286028",
-			}},
+			args: args{
+				h: v1.Hash{
+					Algorithm: "sha256",
+					Hex:       "531743b7098cb2aaf615641007a129173f63ed86ca32fe7b5a246a1c47286028",
+				},
+			},
 			wantErr: false,
 		},
 		{
 			name:      "ImageSave returns 404",
 			imageName: "alpine:3.11",
-			args: args{h: v1.Hash{
-				Algorithm: "sha256",
-				Hex:       "531743b7098cb2aaf615641007a129173f63ed86ca32fe7b5a246a1c47286028",
-			}},
+			args: args{
+				h: v1.Hash{
+					Algorithm: "sha256",
+					Hex:       "531743b7098cb2aaf615641007a129173f63ed86ca32fe7b5a246a1c47286028",
+				},
+			},
 			wantErr: true,
 		},
 	}
@@ -285,7 +288,7 @@ func Test_image_LayerByDiffID(t *testing.T) {
 			ref, err := name.ParseReference(tt.imageName)
 			require.NoError(t, err)
 
-			img, cleanup, err := DockerImage(ref, "")
+			img, cleanup, err := DockerImage(t.Context(), ref, "")
 			require.NoError(t, err)
 			defer cleanup()
 
@@ -314,7 +317,7 @@ func Test_image_RawConfigFile(t *testing.T) {
 			ref, err := name.ParseReference(tt.imageName)
 			require.NoError(t, err)
 
-			img, cleanup, err := DockerImage(ref, "")
+			img, cleanup, err := DockerImage(t.Context(), ref, "")
 			require.NoError(t, err)
 			defer cleanup()
 

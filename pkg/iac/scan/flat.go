@@ -5,7 +5,12 @@ import (
 	"github.com/aquasecurity/trivy/pkg/iac/severity"
 )
 
+// TODO: This struct is not currently serialized to JSON,
+// so JSON tags may be removed if unused.
 type FlatResult struct {
+	// TODO: The following fields are currently unused:
+	// nolint: gocritic
+	// Deprecated, RuleID, LongID, RuleSummary, Impact, RangeAnnotation
 	Deprecated      bool               `json:"deprecated,omitempty"`
 	RuleID          string             `json:"rule_id"`
 	LongID          string             `json:"long_id"`
@@ -18,11 +23,11 @@ type FlatResult struct {
 	Description     string             `json:"description"`
 	RangeAnnotation string             `json:"-"`
 	Severity        severity.Severity  `json:"severity"`
-	Warning         bool               `json:"warning"`
 	Status          Status             `json:"status"`
 	Resource        string             `json:"resource"`
 	Occurrences     []Occurrence       `json:"occurrences,omitempty"`
 	Location        FlatRange          `json:"location"`
+	RenderedCause   RenderedCause      `json:"rendered_cause"`
 }
 
 type FlatRange struct {
@@ -32,7 +37,7 @@ type FlatRange struct {
 }
 
 func (r Results) Flatten() []FlatResult {
-	var results []FlatResult
+	results := make([]FlatResult, 0, len(r))
 	for _, original := range r {
 		results = append(results, original.Flatten())
 	}
@@ -50,8 +55,7 @@ func (r *Result) Flatten() FlatResult {
 
 	return FlatResult{
 		Deprecated:      r.rule.Deprecated,
-		RuleID:          r.rule.AVDID,
-		LongID:          r.Rule().LongID(),
+		LongID:          r.Rule().CanonicalID(),
 		RuleSummary:     r.rule.Summary,
 		RuleProvider:    r.rule.Provider,
 		RuleService:     r.rule.Service,
@@ -64,11 +68,11 @@ func (r *Result) Flatten() FlatResult {
 		Status:          r.status,
 		Resource:        resMetadata.Reference(),
 		Occurrences:     r.Occurrences(),
-		Warning:         r.IsWarning(),
 		Location: FlatRange{
 			Filename:  rng.GetFilename(),
 			StartLine: rng.GetStartLine(),
 			EndLine:   rng.GetEndLine(),
 		},
+		RenderedCause: r.renderedCause,
 	}
 }

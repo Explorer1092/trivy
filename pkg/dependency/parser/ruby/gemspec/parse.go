@@ -2,6 +2,7 @@ package gemspec
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"regexp"
 	"strings"
@@ -48,7 +49,7 @@ func NewParser() *Parser {
 	return &Parser{}
 }
 
-func (p *Parser) Parse(r xio.ReadSeekerAt) (pkgs []ftypes.Package, deps []ftypes.Dependency, err error) {
+func (p *Parser) Parse(_ context.Context, r xio.ReadSeekerAt) (pkgs []ftypes.Package, deps []ftypes.Dependency, err error) {
 	var newVar, name, version, license string
 
 	scanner := bufio.NewScanner(r)
@@ -123,12 +124,12 @@ func trim(s string) string {
 func parseLicenses(s string) string {
 	// e.g. `"Ruby".freeze, "BSDL".freeze`
 	//      => {"\"Ruby\".freeze", "\"BSDL\".freeze"}
-	ss := strings.Split(s, ",")
+	ss := strings.SplitSeq(s, ",")
 
 	// e.g. {"\"Ruby\".freeze", "\"BSDL\".freeze"}
 	//      => {"Ruby", "BSDL"}
 	var licenses []string
-	for _, l := range ss {
+	for l := range ss {
 		licenses = append(licenses, trim(l))
 	}
 

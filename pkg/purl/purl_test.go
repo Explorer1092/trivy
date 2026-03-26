@@ -66,6 +66,19 @@ func TestNewPackageURL(t *testing.T) {
 			},
 		},
 		{
+			name: "bun package",
+			typ:  ftypes.Bun,
+			pkg: ftypes.Package{
+				Name:    "bun-types@1.2.14",
+				Version: "1.2.14",
+			},
+			want: &purl.PackageURL{
+				Type:    packageurl.TypeNPM,
+				Name:    "bun-types@1.2.14",
+				Version: "1.2.14",
+			},
+		},
+		{
 			name: "yarn package",
 			typ:  ftypes.Yarn,
 			pkg: ftypes.Package{
@@ -440,14 +453,86 @@ func TestNewPackageURL(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "bottlerocket package",
+			typ:  ftypes.Bottlerocket,
+			metadata: types.Metadata{
+				OS: &ftypes.OS{
+					Family: ftypes.Bottlerocket,
+					Name:   "1.34.0",
+				},
+			},
+			pkg: ftypes.Package{
+				ID:      "glibc@2.40",
+				Name:    "glibc",
+				Version: "2.40",
+				Epoch:   1,
+				Arch:    "x86_64",
+			},
+			want: &purl.PackageURL{
+				Type:    "bottlerocket",
+				Name:    "glibc",
+				Version: "2.40",
+				Qualifiers: packageurl.Qualifiers{
+					{
+						Key:   "arch",
+						Value: "x86_64",
+					},
+					{
+						Key:   "epoch",
+						Value: "1",
+					},
+					{
+						Key:   "distro",
+						Value: "bottlerocket-1.34.0",
+					},
+				},
+			},
+		},
+		{
+			name: "coreos package",
+			typ:  ftypes.CoreOS,
+			metadata: types.Metadata{
+				OS: &ftypes.OS{
+					Family: ftypes.CoreOS,
+					Name:   "1.34.0",
+				},
+			},
+			pkg: ftypes.Package{
+				ID:      "glibc@2.40",
+				Name:    "glibc",
+				Version: "2.40",
+				Epoch:   1,
+				Arch:    "x86_64",
+			},
+			want: &purl.PackageURL{
+				Type:      "rpm",
+				Namespace: "coreos",
+				Name:      "glibc",
+				Version:   "2.40",
+				Qualifiers: packageurl.Qualifiers{
+					{
+						Key:   "arch",
+						Value: "x86_64",
+					},
+					{
+						Key:   "epoch",
+						Value: "1",
+					},
+					{
+						Key:   "distro",
+						Value: "coreos-1.34.0",
+					},
+				},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			packageURL, err := purl.New(tc.typ, tc.metadata, tc.pkg)
 			if tc.wantErr != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.wantErr)
+				require.ErrorContains(t, err, tc.wantErr)
 				return
 			}
 			require.NoError(t, err)
@@ -712,6 +797,90 @@ func TestPackageURL_Package(t *testing.T) {
 			},
 		},
 		{
+			name: "bottlerocket with epoch",
+			pkgURL: &purl.PackageURL{
+				Type:    "bottlerocket",
+				Name:    "glibc",
+				Version: "2.40",
+				Qualifiers: packageurl.Qualifiers{
+					{
+						Key:   "epoch",
+						Value: "1",
+					},
+					{
+						Key:   "distro",
+						Value: "bottlerocket-1.34.0",
+					},
+				},
+			},
+			wantPkg: &ftypes.Package{
+				ID:      "glibc@2.40",
+				Name:    "glibc",
+				Version: "2.40",
+				Epoch:   1,
+				Identifier: ftypes.PkgIdentifier{
+					PURL: &packageurl.PackageURL{
+						Type:    "bottlerocket",
+						Name:    "glibc",
+						Version: "2.40",
+						Qualifiers: packageurl.Qualifiers{
+							{
+								Key:   "epoch",
+								Value: "1",
+							},
+							{
+								Key:   "distro",
+								Value: "bottlerocket-1.34.0",
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "coreos with epoch",
+			pkgURL: &purl.PackageURL{
+				Type:      "rpm",
+				Namespace: "coreos",
+				Name:      "glibc",
+				Version:   "2.40",
+				Qualifiers: packageurl.Qualifiers{
+					{
+						Key:   "epoch",
+						Value: "1",
+					},
+					{
+						Key:   "distro",
+						Value: "coreos-1.34.0",
+					},
+				},
+			},
+			wantPkg: &ftypes.Package{
+				ID:      "glibc@2.40",
+				Name:    "glibc",
+				Version: "2.40",
+				Epoch:   1,
+				Identifier: ftypes.PkgIdentifier{
+					PURL: &packageurl.PackageURL{
+						Type:      "rpm",
+						Namespace: "coreos",
+						Name:      "glibc",
+						Version:   "2.40",
+						Qualifiers: packageurl.Qualifiers{
+							{
+								Key:   "epoch",
+								Value: "1",
+							},
+							{
+								Key:   "distro",
+								Value: "coreos-1.34.0",
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			name: "wrong epoch",
 			pkgURL: &purl.PackageURL{
 				Type:      packageurl.TypeRPM,
@@ -809,38 +978,38 @@ func TestPackageURL_Match(t *testing.T) {
 	}{
 		{
 			name:       "same purl",
-			constraint: "pkg:golang/github.com/aquasecurity/trivy@0.49.0",
-			target:     "pkg:golang/github.com/aquasecurity/trivy@0.49.0",
+			constraint: "pkg:golang/github.com/aquasecurity/trivy@v0.49.0",
+			target:     "pkg:golang/github.com/aquasecurity/trivy@v0.49.0",
 			want:       true,
 		},
 		{
 			name:       "different type",
-			constraint: "pkg:golang/github.com/aquasecurity/trivy@0.49.0",
+			constraint: "pkg:golang/github.com/aquasecurity/trivy@v0.49.0",
 			target:     "pkg:maven/github.com/aquasecurity/trivy@0.49.0",
 			want:       false,
 		},
 		{
 			name:       "different namespace",
-			constraint: "pkg:golang/github.com/aquasecurity/trivy@0.49.0",
-			target:     "pkg:golang/github.com/aquasecurity2/trivy@0.49.0",
+			constraint: "pkg:golang/github.com/aquasecurity/trivy@v0.49.0",
+			target:     "pkg:golang/github.com/aquasecurity2/trivy@v.49.0",
 			want:       false,
 		},
 		{
 			name:       "different name",
-			constraint: "pkg:golang/github.com/aquasecurity/trivy@0.49.0",
-			target:     "pkg:golang/github.com/aquasecurity/tracee@0.49.0",
+			constraint: "pkg:golang/github.com/aquasecurity/trivy@v0.49.0",
+			target:     "pkg:golang/github.com/aquasecurity/tracee@v0.49.0",
 			want:       false,
 		},
 		{
 			name:       "different version",
-			constraint: "pkg:golang/github.com/aquasecurity/trivy@0.49.0",
-			target:     "pkg:golang/github.com/aquasecurity/trivy@0.49.1",
+			constraint: "pkg:golang/github.com/aquasecurity/trivy@v0.49.0",
+			target:     "pkg:golang/github.com/aquasecurity/trivy@v0.49.1",
 			want:       false,
 		},
 		{
 			name:       "version wildcard",
 			constraint: "pkg:golang/github.com/aquasecurity/trivy",
-			target:     "pkg:golang/github.com/aquasecurity/trivy@0.50.0",
+			target:     "pkg:golang/github.com/aquasecurity/trivy@v0.50.0",
 			want:       true,
 		},
 		{

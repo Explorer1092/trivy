@@ -11,6 +11,7 @@ builds:
       - -X github.com/aquasecurity/trivy/pkg/version/app.ver={{.Version}}
     env:
       - CGO_ENABLED=0
+      - GOEXPERIMENT=jsonv2
     goos:
       - linux
     goarch:
@@ -31,11 +32,13 @@ builds:
       - -X github.com/aquasecurity/trivy/pkg/version/app.ver={{.Version}}
     env:
       - CGO_ENABLED=0
+      - GOEXPERIMENT=jsonv2
     goos:
       - freebsd
     goarch:
       # modernc.org/sqlite doesn't support freebsd/arm64, etc.
-      - 386
+      # Also, freebsd/386 is no longer supported in modernc.org/libc
+      # See: https://gitlab.com/cznic/libc/-/issues/45
       - amd64
   - id: build-macos
     main: ./cmd/trivy/
@@ -46,6 +49,7 @@ builds:
       - -X github.com/aquasecurity/trivy/pkg/version/app.ver={{.Version}}
     env:
       - CGO_ENABLED=0
+      - GOEXPERIMENT=jsonv2
     goos:
       - darwin
     goarch:
@@ -62,6 +66,7 @@ builds:
       - -X github.com/aquasecurity/trivy/pkg/version/app.ver={{.Version}}
     env:
       - CGO_ENABLED=0
+      - GOEXPERIMENT=jsonv2
     goos:
       - windows
     goarch:
@@ -82,7 +87,7 @@ nfpms:
       - rpm
     vendor: "aquasecurity"
     homepage: "https://github.com/aquasecurity"
-    maintainer: "Teppei Fukuda <knqyf263@gmail.com>"
+    maintainer: "Aqua Security <oss@aquasec.com>"
     description: "A Fast Vulnerability Scanner for Containers"
     license: "Apache-2.0"
     file_name_template: >-
@@ -140,6 +145,7 @@ brews:
       name: homebrew-trivy
     homepage: "https://github.com/aquasecurity/trivy"
     description: "Scanner for vulnerabilities in container images, file systems, and Git repositories, as well as for configuration issues"
+    url_template: "https://get.trivy.dev/trivy?version={{ .Version }}&os={{ tolower .Os }}&arch={{ tolower .Arch }}"
     test: |
       system "#{bin}/trivy", "--version"
 
@@ -165,7 +171,7 @@ dockers:
       - "--label=org.opencontainers.image.source=https://github.com/aquasecurity/trivy"
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
       - "--label=org.opencontainers.image.url=https://www.aquasec.com/products/trivy/"
-      - "--label=org.opencontainers.image.documentation=https://aquasecurity.github.io/trivy/v{{ .Version }}/"
+      - "--label=org.opencontainers.image.documentation=https://trivy.dev/v{{ .Version }}/"
       - "--platform=linux/amd64"
     extra_files:
     - contrib/
@@ -190,7 +196,7 @@ dockers:
       - "--label=org.opencontainers.image.source=https://github.com/aquasecurity/trivy"
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
       - "--label=org.opencontainers.image.url=https://www.aquasec.com/products/trivy/"
-      - "--label=org.opencontainers.image.documentation=https://aquasecurity.github.io/trivy/v{{ .Version }}/"
+      - "--label=org.opencontainers.image.documentation=https://trivy.dev/v{{ .Version }}/"
       - "--platform=linux/arm64"
     extra_files:
     - contrib/
@@ -215,7 +221,7 @@ dockers:
       - "--label=org.opencontainers.image.source=https://github.com/aquasecurity/trivy"
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
       - "--label=org.opencontainers.image.url=https://www.aquasec.com/products/trivy/"
-      - "--label=org.opencontainers.image.documentation=https://aquasecurity.github.io/trivy/v{{ .Version }}/"
+      - "--label=org.opencontainers.image.documentation=https://trivy.dev/v{{ .Version }}/"
       - "--platform=linux/s390x"
     extra_files:
     - contrib/
@@ -240,7 +246,7 @@ dockers:
       - "--label=org.opencontainers.image.source=https://github.com/aquasecurity/trivy"
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
       - "--label=org.opencontainers.image.url=https://www.aquasec.com/products/trivy/"
-      - "--label=org.opencontainers.image.documentation=https://aquasecurity.github.io/trivy/v{{ .Version }}/"
+      - "--label=org.opencontainers.image.documentation=https://trivy.dev/v{{ .Version }}/"
       - "--platform=linux/ppc64le"
     extra_files:
     - contrib/
@@ -287,13 +293,10 @@ signs:
 - cmd: cosign
   env:
   - COSIGN_EXPERIMENTAL=1
-  signature: "${artifact}.sig"
-  certificate: "${artifact}.pem"
+  signature: "${artifact}.sigstore.json"
   args:
     - "sign-blob"
-    - "--oidc-issuer=https://token.actions.githubusercontent.com"
-    - "--output-certificate=${certificate}"
-    - "--output-signature=${signature}"
+    - "--bundle=${signature}"
     - "${artifact}"
     - "--yes"
   artifacts: all

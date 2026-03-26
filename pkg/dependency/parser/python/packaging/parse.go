@@ -2,10 +2,12 @@ package packaging
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"io"
 	"net/textproto"
 	"strings"
+	"sync"
 
 	"golang.org/x/xerrors"
 
@@ -14,6 +16,8 @@ import (
 	"github.com/aquasecurity/trivy/pkg/log"
 	xio "github.com/aquasecurity/trivy/pkg/x/io"
 )
+
+var licenseMetadataInfoOnce sync.Once
 
 type Parser struct {
 	logger *log.Logger
@@ -27,7 +31,7 @@ func NewParser() *Parser {
 
 // Parse parses egg and wheel metadata.
 // e.g. .egg-info/PKG-INFO and dist-info/METADATA
-func (p *Parser) Parse(r xio.ReadSeekerAt) ([]ftypes.Package, []ftypes.Dependency, error) {
+func (p *Parser) Parse(_ context.Context, r xio.ReadSeekerAt) ([]ftypes.Package, []ftypes.Dependency, error) {
 	rd := textproto.NewReader(bufio.NewReader(r))
 	h, err := rd.ReadMIMEHeader()
 	if e := textproto.ProtocolError(""); errors.As(err, &e) {
@@ -70,7 +74,10 @@ func (p *Parser) Parse(r xio.ReadSeekerAt) ([]ftypes.Package, []ftypes.Dependenc
 
 		if l := h.Get("License"); l != "" {
 			if len(licenses) != 0 {
-				p.logger.Info("License acquired from METADATA classifiers may be subject to additional terms",
+				licenseMetadataInfoOnce.Do(func() {
+					p.logger.Info("Licenses acquired from one or more METADATA files may be subject to additional terms. Use `--debug` flag to see all affected packages.")
+				})
+				p.logger.Debug("License acquired from METADATA classifiers may be subject to additional terms",
 					log.String("name", name), log.String("version", version))
 			} else {
 				license = l

@@ -1,8 +1,6 @@
 package sbom_test
 
 import (
-	"context"
-	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/aquasecurity/trivy/internal/cachetest"
+	"github.com/aquasecurity/trivy/internal/testutil"
 	"github.com/aquasecurity/trivy/pkg/cache"
 	"github.com/aquasecurity/trivy/pkg/fanal/artifact"
 	"github.com/aquasecurity/trivy/pkg/fanal/artifact/sbom"
@@ -19,18 +19,19 @@ import (
 
 func TestArtifact_Inspect(t *testing.T) {
 	tests := []struct {
-		name               string
-		filePath           string
-		putBlobExpectation cache.ArtifactCachePutBlobExpectation
-		want               artifact.Reference
-		wantErr            []string
+		name       string
+		filePath   string
+		setUpCache func(t *testing.T) cache.Cache
+		wantBlobs  []cachetest.WantBlob
+		want       artifact.Reference
+		wantErr    []string
 	}{
 		{
 			name:     "happy path",
 			filePath: filepath.Join("testdata", "bom.json"),
-			putBlobExpectation: cache.ArtifactCachePutBlobExpectation{
-				Args: cache.ArtifactCachePutBlobArgs{
-					BlobID: "sha256:76bc49ae239d24c6a122e730bafb9d5295d0af380492aeb92a3bf34bea3a14ca",
+			wantBlobs: []cachetest.WantBlob{
+				{
+					ID: "sha256:76bc49ae239d24c6a122e730bafb9d5295d0af380492aeb92a3bf34bea3a14ca",
 					BlobInfo: types.BlobInfo{
 						SchemaVersion: types.BlobJSONSchemaVersion,
 						OS: types.OS{
@@ -186,23 +187,33 @@ func TestArtifact_Inspect(t *testing.T) {
 						},
 					},
 				},
-				Returns: cache.ArtifactCachePutBlobReturns{},
 			},
 			want: artifact.Reference{
 				Name: filepath.Join("testdata", "bom.json"),
-				Type: artifact.TypeCycloneDX,
+				Type: types.TypeCycloneDX,
 				ID:   "sha256:76bc49ae239d24c6a122e730bafb9d5295d0af380492aeb92a3bf34bea3a14ca",
 				BlobIDs: []string{
 					"sha256:76bc49ae239d24c6a122e730bafb9d5295d0af380492aeb92a3bf34bea3a14ca",
+				},
+				ImageMetadata: artifact.ImageMetadata{
+					ID: "sha256:49193a2310dbad4c02382da87ac624a80a92387a4f7536235f9ba590e5bcd7b5",
+					DiffIDs: []string{
+						"sha256:3c79e832b1b4891a1cb4a326ef8524e0bd14a2537150ac0e203a5677176c1ca1",
+						"sha256:dd565ff850e7003356e2b252758f9bdc1ff2803f61e995e24c7844f6297f8fc3",
+					},
+					RepoTags: []string{
+						"maven-test-project:latest",
+					},
+					Reference: testutil.MustParseReference(t, "maven-test-project:latest"),
 				},
 			},
 		},
 		{
 			name:     "happy path for sbom attestation",
 			filePath: filepath.Join("testdata", "sbom.cdx.intoto.jsonl"),
-			putBlobExpectation: cache.ArtifactCachePutBlobExpectation{
-				Args: cache.ArtifactCachePutBlobArgs{
-					BlobID: "sha256:76bc49ae239d24c6a122e730bafb9d5295d0af380492aeb92a3bf34bea3a14ca",
+			wantBlobs: []cachetest.WantBlob{
+				{
+					ID: "sha256:76bc49ae239d24c6a122e730bafb9d5295d0af380492aeb92a3bf34bea3a14ca",
 					BlobInfo: types.BlobInfo{
 						SchemaVersion: types.BlobJSONSchemaVersion,
 						OS: types.OS{
@@ -358,14 +369,106 @@ func TestArtifact_Inspect(t *testing.T) {
 						},
 					},
 				},
-				Returns: cache.ArtifactCachePutBlobReturns{},
 			},
 			want: artifact.Reference{
 				Name: filepath.Join("testdata", "sbom.cdx.intoto.jsonl"),
-				Type: artifact.TypeCycloneDX,
+				Type: types.TypeCycloneDX,
 				ID:   "sha256:76bc49ae239d24c6a122e730bafb9d5295d0af380492aeb92a3bf34bea3a14ca",
 				BlobIDs: []string{
 					"sha256:76bc49ae239d24c6a122e730bafb9d5295d0af380492aeb92a3bf34bea3a14ca",
+				},
+				ImageMetadata: artifact.ImageMetadata{
+					ID: "sha256:49193a2310dbad4c02382da87ac624a80a92387a4f7536235f9ba590e5bcd7b5",
+					DiffIDs: []string{
+						"sha256:3c79e832b1b4891a1cb4a326ef8524e0bd14a2537150ac0e203a5677176c1ca1",
+						"sha256:dd565ff850e7003356e2b252758f9bdc1ff2803f61e995e24c7844f6297f8fc3",
+					},
+					RepoTags: []string{
+						"maven-test-project:latest",
+					},
+				},
+			},
+		},
+		{
+			name:     "components with missing BOM-REF",
+			filePath: filepath.Join("testdata", "bom-missing-refs.json"),
+			wantBlobs: []cachetest.WantBlob{
+				{
+					ID: "sha256:512b9e999c9d7b4880c63ce55c2c74ea5c22b05cdbcb486097a16ec692c746a0",
+					BlobInfo: types.BlobInfo{
+						SchemaVersion: types.BlobJSONSchemaVersion,
+						OS: types.OS{
+							Family: "alpine",
+							Name:   "3.16.0",
+						},
+						PackageInfos: []types.PackageInfo{
+							{
+								Packages: types.Packages{
+									{
+										ID:         "musl@1.2.3-r0",
+										Name:       "musl",
+										Version:    "1.2.3-r0",
+										SrcName:    "musl",
+										SrcVersion: "1.2.3-r0",
+										Licenses:   []string{"MIT"},
+										Layer: types.Layer{
+											DiffID: "sha256:dd565ff850e7003356e2b252758f9bdc1ff2803f61e995e24c7844f6297f8fc3",
+										},
+										Identifier: types.PkgIdentifier{
+											PURL: &packageurl.PackageURL{
+												Type:      packageurl.TypeApk,
+												Namespace: "alpine",
+												Name:      "musl",
+												Version:   "1.2.3-r0",
+												Qualifiers: packageurl.Qualifiers{
+													{
+														Key:   "distro",
+														Value: "3.16.0",
+													},
+												},
+											},
+											// BOM-Ref should be auto-generated from PURL
+											BOMRef: "pkg:apk/alpine/musl@1.2.3-r0?distro=3.16.0",
+										},
+									},
+								},
+							},
+						},
+						Applications: []types.Application{
+							{
+								Type:     "composer",
+								FilePath: "",
+								Packages: types.Packages{
+									{
+										ID:      "pear/log@1.13.1",
+										Name:    "pear/log",
+										Version: "1.13.1",
+										Layer: types.Layer{
+											DiffID: "sha256:3c79e832b1b4891a1cb4a326ef8524e0bd14a2537150ac0e203a5677176c1ca1",
+										},
+										Identifier: types.PkgIdentifier{
+											PURL: &packageurl.PackageURL{
+												Type:      packageurl.TypeComposer,
+												Namespace: "pear",
+												Name:      "log",
+												Version:   "1.13.1",
+											},
+											// BOM-Ref should be auto-generated from PURL
+											BOMRef: "pkg:composer/pear/log@1.13.1",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: artifact.Reference{
+				Name: filepath.Join("testdata", "bom-missing-refs.json"),
+				Type: types.TypeCycloneDX,
+				ID:   "sha256:512b9e999c9d7b4880c63ce55c2c74ea5c22b05cdbcb486097a16ec692c746a0",
+				BlobIDs: []string{
+					"sha256:512b9e999c9d7b4880c63ce55c2c74ea5c22b05cdbcb486097a16ec692c746a0",
 				},
 			},
 		},
@@ -380,33 +483,22 @@ func TestArtifact_Inspect(t *testing.T) {
 		{
 			name:     "sad path PutBlob returns an error",
 			filePath: filepath.Join("testdata", "os-only-bom.json"),
-			putBlobExpectation: cache.ArtifactCachePutBlobExpectation{
-				Args: cache.ArtifactCachePutBlobArgs{
-					BlobID: "sha256:911a6c875617315c51971dddf19fa2d47d6132cd14e9c6a87deb074afaf07818",
-					BlobInfo: types.BlobInfo{
-						SchemaVersion: types.BlobJSONSchemaVersion,
-						OS: types.OS{
-							Family: "alpine",
-							Name:   "3.16.0",
-						},
-					},
-				},
-				Returns: cache.ArtifactCachePutBlobReturns{
-					Err: errors.New("error"),
-				},
+			setUpCache: func(_ *testing.T) cache.Cache {
+				return cachetest.NewErrorCache(cachetest.ErrorCacheOptions{
+					PutBlob: true,
+				})
 			},
 			wantErr: []string{"failed to store blob"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := new(cache.MockArtifactCache)
-			c.ApplyPutBlobExpectation(tt.putBlobExpectation)
+			c := cachetest.NewCache(t, tt.setUpCache)
 
 			a, err := sbom.NewArtifact(tt.filePath, c, artifact.Option{})
 			require.NoError(t, err)
 
-			got, err := a.Inspect(context.Background())
+			got, err := a.Inspect(t.Context())
 			if len(tt.wantErr) > 0 {
 				require.Error(t, err)
 				found := false
@@ -425,6 +517,7 @@ func TestArtifact_Inspect(t *testing.T) {
 
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
+			cachetest.AssertBlobs(t, c, tt.wantBlobs)
 		})
 	}
 }

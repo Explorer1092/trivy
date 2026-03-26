@@ -2,6 +2,7 @@ package pip
 
 import (
 	"bufio"
+	"context"
 	"strings"
 	"unicode"
 
@@ -36,20 +37,41 @@ func NewParser(useMinVersion bool) *Parser {
 	}
 }
 func (p *Parser) splitLine(line string) []string {
-	separators := []string{"~=", ">=", "=="}
-	// Without useMinVersion check only `==`
-	if !p.useMinVersion {
-		separators = []string{"=="}
+	name, specs := splitNameAndSpecs(line)
+	if name == "" || specs == "" {
+		return nil
 	}
-	for _, sep := range separators {
-		if result := strings.Split(line, sep); len(result) == 2 {
-			return result
+
+	operators := []string{"~=", ">=", "=="}
+	if !p.useMinVersion {
+		operators = []string{"=="}
+	}
+
+	// Iterate over comma-separated version specifiers and find a usable version.
+	for _, op := range operators {
+		for spec := range strings.SplitSeq(specs, ",") {
+			if ver, found := strings.CutPrefix(spec, op); found {
+				return []string{name, ver}
+			}
 		}
 	}
 	return nil
 }
 
-func (p *Parser) Parse(r xio.ReadSeekerAt) ([]ftypes.Package, []ftypes.Dependency, error) {
+// splitNameAndSpecs splits a line at the first character that is not part of
+// a valid PEP 508 package name (i.e. not [a-zA-Z0-9._-]).
+// Note: PEP 508 disallows leading/trailing [._-], but we accept them for simplicity.
+// e.g. "eventlet!=0.18.3,!=0.20.1,>=0.18.2" -> ("eventlet", "!=0.18.3,!=0.20.1,>=0.18.2")
+func splitNameAndSpecs(line string) (string, string) {
+	for i, r := range line {
+		if !isNameChar(r) {
+			return line[:i], line[i:]
+		}
+	}
+	return line, ""
+}
+
+func (p *Parser) Parse(_ context.Context, r xio.ReadSeekerAt) ([]ftypes.Package, []ftypes.Dependency, error) {
 	// `requirements.txt` can use byte order marks (BOM)
 	// e.g. on Windows `requirements.txt` can use UTF-16LE with BOM
 	// We need to override them to avoid the file being read incorrectly
@@ -115,11 +137,15 @@ func removeExtras(line string) string {
 	return line
 }
 
+// isNameChar reports whether r is a valid character in a PEP 508 package name.
+// cf. https://peps.python.org/pep-0508/#names
+func isNameChar(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '.' || r == '_' || r == '-'
+}
+
 func isValidName(name string) bool {
 	for _, r := range name {
-		// only characters [A-Z0-9._-] are allowed (case insensitive)
-		// cf. https://peps.python.org/pep-0508/#names
-		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '.' && r != '_' && r != '-' {
+		if !isNameChar(r) {
 			return false
 		}
 	}

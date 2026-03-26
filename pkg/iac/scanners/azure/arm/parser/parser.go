@@ -3,13 +3,12 @@ package parser
 import (
 	"context"
 	"fmt"
-	"io"
 	"io/fs"
 
+	"github.com/samber/lo"
+
 	"github.com/aquasecurity/trivy/pkg/iac/scanners/azure"
-	"github.com/aquasecurity/trivy/pkg/iac/scanners/azure/arm/parser/armjson"
 	"github.com/aquasecurity/trivy/pkg/iac/scanners/azure/resolver"
-	"github.com/aquasecurity/trivy/pkg/iac/types"
 	"github.com/aquasecurity/trivy/pkg/log"
 )
 
@@ -42,16 +41,12 @@ func (p *Parser) ParseFS(ctx context.Context, dir string) ([]azure.Deployment, e
 			return nil
 		}
 
-		f, err := p.targetFS.Open(path)
+		deployment, err := p.parseFile(path)
 		if err != nil {
-			return err
+			p.logger.Error("Failed to parse file", log.FilePath(path), log.Err(err))
+			return nil
 		}
-		defer f.Close()
 
-		deployment, err := p.parseFile(f, path)
-		if err != nil {
-			return err
-		}
 		deployments = append(deployments, *deployment)
 		return nil
 	}); err != nil {
@@ -61,27 +56,18 @@ func (p *Parser) ParseFS(ctx context.Context, dir string) ([]azure.Deployment, e
 	return deployments, nil
 }
 
-func (p *Parser) parseFile(r io.Reader, filename string) (*azure.Deployment, error) {
-	var template Template
-	data, err := io.ReadAll(r)
+func (p *Parser) parseFile(path string) (*azure.Deployment, error) {
+	template, err := ParseTemplate(p.targetFS, path)
 	if err != nil {
-		return nil, err
-	}
-	root := types.NewMetadata(
-		types.NewRange(filename, 0, 0, "", p.targetFS),
-		"",
-	).WithInternal(resolver.NewResolver())
-
-	if err := armjson.Unmarshal(data, &template, &root); err != nil {
-		return nil, fmt.Errorf("failed to parse template: %w", err)
+		return nil, fmt.Errorf("parse template: %w", err)
 	}
 	return p.convertTemplate(template), nil
 }
 
-func (p *Parser) convertTemplate(template Template) *azure.Deployment {
+func (p *Parser) convertTemplate(template *Template) *azure.Deployment {
 
 	deployment := azure.Deployment{
-		Metadata:    template.Metadata,
+		Metadata:    lo.FromPtr(template.Metadata),
 		TargetScope: azure.ScopeResourceGroup, // TODO: override from --resource-group?
 		Parameters:  nil,
 		Variables:   nil,
@@ -135,7 +121,7 @@ func (p *Parser) convertResource(input Resource) azure.Resource {
 	}
 
 	resource := azure.Resource{
-		Metadata:   input.Metadata,
+		Metadata:   lo.FromPtr(input.Metadata),
 		APIVersion: input.APIVersion,
 		Type:       input.Type,
 		Kind:       input.Kind,

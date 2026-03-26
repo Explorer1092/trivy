@@ -10,14 +10,16 @@ import (
 	"github.com/aquasecurity/trivy/pkg/log"
 	"github.com/aquasecurity/trivy/pkg/sbom/core"
 	sbomio "github.com/aquasecurity/trivy/pkg/sbom/io"
+	"github.com/aquasecurity/trivy/pkg/set"
 	"github.com/aquasecurity/trivy/pkg/types"
 	"github.com/aquasecurity/trivy/pkg/uuid"
 )
 
 const (
-	TypeFile       SourceType = "file"
-	TypeRepository SourceType = "repo"
-	TypeOCI        SourceType = "oci"
+	TypeFile          SourceType = "file"
+	TypeRepository    SourceType = "repo"
+	TypeOCI           SourceType = "oci"
+	TypeSBOMReference SourceType = "sbom-ref"
 )
 
 // VEX represents Vulnerability Exploitability eXchange. It abstracts multiple VEX formats.
@@ -49,6 +51,8 @@ func NewSource(src string) Source {
 		return Source{Type: TypeRepository}
 	case "oci":
 		return Source{Type: TypeOCI}
+	case "sbom-ref":
+		return Source{Type: TypeSBOMReference}
 	default:
 		return Source{
 			Type:     TypeFile,
@@ -72,7 +76,7 @@ func Filter(ctx context.Context, report *types.Report, opts Options) error {
 	}
 
 	// NOTE: This method call has a side effect on the report
-	bom, err := sbomio.NewEncoder(core.Options{Parents: true}).Encode(*report)
+	bom, err := sbomio.NewEncoder(sbomio.WithParents(), sbomio.ForceRegenerate()).Encode(*report)
 	if err != nil {
 		return xerrors.Errorf("unable to encode the SBOM: %w", err)
 	}
@@ -108,6 +112,13 @@ func New(ctx context.Context, report *types.Report, opts Options) (*Client, erro
 			v, err = NewOCI(report)
 			if err != nil {
 				return nil, xerrors.Errorf("VEX OCI error: %w", err)
+			} else if lo.IsNil(v) {
+				continue
+			}
+		case TypeSBOMReference:
+			v, err = NewSBOMReferenceSet(report)
+			if err != nil {
+				return nil, xerrors.Errorf("failed to create set of external VEX documents: %w", err)
 			} else if v == nil {
 				continue
 			}
@@ -135,7 +146,7 @@ func (c *Client) NotAffected(vuln types.DetectedVulnerability, product, subCompo
 }
 
 func filterVulnerabilities(result *types.Result, bom *core.BOM, fn NotAffected) {
-	components := lo.MapEntries(bom.Components(), func(id uuid.UUID, component *core.Component) (string, *core.Component) {
+	components := lo.MapEntries(bom.Components(), func(_ uuid.UUID, component *core.Component) (string, *core.Component) {
 		return component.PkgIdentifier.UID, component
 	})
 
@@ -165,35 +176,44 @@ func filterVulnerabilities(result *types.Result, bom *core.BOM, fn NotAffected) 
 
 // reachRoot traverses the component tree from the leaf to the root and returns true if the leaf reaches the root.
 func reachRoot(leaf *core.Component, components map[uuid.UUID]*core.Component, parents map[uuid.UUID][]uuid.UUID,
-	notAffected func(c, leaf *core.Component) bool) bool {
-
+	notAffected func(c, leaf *core.Component) bool,
+) bool {
 	if notAffected(leaf, nil) {
 		return false
 	}
 
-	visited := make(map[uuid.UUID]bool)
-
 	// Use Depth First Search (DFS)
-	var dfs func(c *core.Component) bool
-	dfs = func(c *core.Component) bool {
+	var dfs func(c *core.Component, visited set.Set[uuid.UUID]) bool
+	dfs = func(c *core.Component, visited set.Set[uuid.UUID]) bool {
+
 		// Call the function with the current component and the leaf component
-		if notAffected(c, leaf) {
+		switch {
+		case notAffected(c, leaf):
 			return false
-		} else if c.Root {
+		case c.Root:
+			return true
+		case set.New[uuid.UUID](parents[c.ID()]...).Difference(visited).Size() == 0:
+			// Should never go here, since all components except the root must have at least one parent and be related to the root component.
+			// If it does, it means the component tree is not connected due to a bug in the SBOM generation.
+			// In this case, so as not to filter out all the vulnerabilities accidentally, return true for fail-safe.
 			return true
 		}
 
-		visited[c.ID()] = true
+		visited.Append(c.ID())
 		for _, parent := range parents[c.ID()] {
-			if visited[parent] {
+			if visited.Contains(parent) {
 				continue
 			}
-			if dfs(components[parent]) {
+
+			// Each DFS path needs its own visited set,
+			// to avoid false positives in other paths
+			newVisited := visited.Clone()
+			if dfs(components[parent], newVisited) {
 				return true
 			}
 		}
 		return false
 	}
 
-	return dfs(leaf)
+	return dfs(leaf, set.New[uuid.UUID]())
 }

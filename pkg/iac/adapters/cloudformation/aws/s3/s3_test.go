@@ -3,8 +3,7 @@ package s3
 import (
 	"testing"
 
-	"github.com/liamg/iamgo"
-
+	"github.com/aquasecurity/iamgo"
 	"github.com/aquasecurity/trivy/pkg/iac/adapters/cloudformation/testutil"
 	"github.com/aquasecurity/trivy/pkg/iac/providers/aws/iam"
 	"github.com/aquasecurity/trivy/pkg/iac/providers/aws/s3"
@@ -141,7 +140,7 @@ Resources:
 					{
 						Name: types.StringTest("test-bucket"),
 						Encryption: s3.Encryption{
-							Enabled: types.BoolDefault(false, types.NewTestMetadata()),
+							Enabled: types.BoolTest(false),
 						},
 					},
 				},
@@ -166,7 +165,7 @@ Resources:
 					{
 						Name: types.StringTest("test-bucket"),
 						Encryption: s3.Encryption{
-							Enabled:   types.BoolDefault(false, types.NewTestMetadata()),
+							Enabled:   types.BoolTest(false),
 							KMSKeyId:  types.StringTest("alias/my-key"),
 							Algorithm: types.StringTest("aes256"),
 						},

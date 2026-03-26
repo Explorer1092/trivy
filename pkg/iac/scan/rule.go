@@ -3,6 +3,7 @@ package scan
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"golang.org/x/text/cases"
@@ -36,24 +37,29 @@ type TerraformCustomCheck struct {
 }
 
 type Rule struct {
-	Deprecated     bool                             `json:"deprecated"`
-	AVDID          string                           `json:"avd_id"`
-	Aliases        []string                         `json:"aliases"`
-	ShortCode      string                           `json:"short_code"`
-	Summary        string                           `json:"summary"`
-	Explanation    string                           `json:"explanation"`
-	Impact         string                           `json:"impact"`
-	Resolution     string                           `json:"resolution"`
-	Provider       providers.Provider               `json:"provider"`
-	Service        string                           `json:"service"`
-	Links          []string                         `json:"links"`
-	Severity       severity.Severity                `json:"severity"`
-	Terraform      *EngineMetadata                  `json:"terraform,omitempty"`
-	CloudFormation *EngineMetadata                  `json:"cloud_formation,omitempty"`
-	CustomChecks   CustomChecks                     `json:"-"`
-	RegoPackage    string                           `json:"-"`
-	Frameworks     map[framework.Framework][]string `json:"frameworks"`
-	Check          CheckFunc                        `json:"-"`
+	ID         string `json:"id"`
+	Deprecated bool   `json:"deprecated"`
+	// Deprecated: Use the ID field instead.
+	AVDID               string                           `json:"avd_id"`
+	Aliases             []string                         `json:"aliases"`
+	LongID              string                           `json:"long_id"`
+	ShortCode           string                           `json:"short_code"`
+	Summary             string                           `json:"summary"`
+	Explanation         string                           `json:"explanation"`
+	Impact              string                           `json:"impact"`
+	Resolution          string                           `json:"resolution"`
+	Provider            providers.Provider               `json:"provider"`
+	Service             string                           `json:"service"`
+	Links               []string                         `json:"links"`
+	Severity            severity.Severity                `json:"severity"`
+	Terraform           *EngineMetadata                  `json:"terraform,omitempty"`
+	CloudFormation      *EngineMetadata                  `json:"cloud_formation,omitempty"`
+	Examples            string                           `json:"-"`
+	CustomChecks        CustomChecks                     `json:"-"`
+	RegoPackage         string                           `json:"-"`
+	Frameworks          map[framework.Framework][]string `json:"frameworks"`
+	Check               CheckFunc                        `json:"-"`
+	MinimumTrivyVersion string                           `json:"minimum_trivy_version"`
 }
 
 func (r Rule) IsDeprecated() bool {
@@ -61,18 +67,16 @@ func (r Rule) IsDeprecated() bool {
 }
 
 func (r Rule) HasID(id string) bool {
-	if r.AVDID == id || r.LongID() == id {
+	if r.ID == id || r.AVDID == id || r.LongID == id || r.CanonicalID() == id {
 		return true
 	}
-	for _, alias := range r.Aliases {
-		if alias == id {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(r.Aliases, id)
 }
 
-func (r Rule) LongID() string {
+func (r Rule) CanonicalID() string {
+	if r.LongID != "" {
+		return r.LongID
+	}
 	return strings.ToLower(fmt.Sprintf("%s-%s-%s", r.Provider, r.Service, r.ShortCode))
 }
 
@@ -82,21 +86,6 @@ func (r Rule) ServiceDisplayName() string {
 
 func (r Rule) ShortCodeDisplayName() string {
 	return nicify(r.ShortCode)
-}
-
-func (r Rule) CanCheck() bool {
-	return r.Check != nil
-}
-
-func (r Rule) Evaluate(s *state.State) Results {
-	if !r.CanCheck() {
-		return nil
-	}
-	results := r.Check(s)
-	for i := range results {
-		results[i].SetRule(r)
-	}
-	return results
 }
 
 var acronyms = []string{

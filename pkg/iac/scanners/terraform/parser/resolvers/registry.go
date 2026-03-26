@@ -3,6 +3,7 @@ package resolvers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/aquasecurity/go-version/pkg/version"
 	"github.com/aquasecurity/trivy/pkg/log"
+	xhttp "github.com/aquasecurity/trivy/pkg/x/http"
 )
 
 type registryResolver struct {
@@ -22,18 +24,20 @@ type registryResolver struct {
 }
 
 var Registry = &registryResolver{
-	client: &http.Client{
-		// give it a maximum 5 seconds to resolve the module
-		Timeout: time.Second * 5,
-	},
+	// give it a maximum 5 seconds to resolve the module
+	client: xhttp.Client(xhttp.WithTimeout(5 * time.Second)),
 }
 
 type moduleVersions struct {
-	Modules []struct {
-		Versions []struct {
-			Version string `json:"version"`
-		} `json:"versions"`
-	} `json:"modules"`
+	Modules []moduleProviderVersions `json:"modules"`
+}
+
+type moduleProviderVersions struct {
+	Versions []moduleVersion `json:"versions"`
+}
+
+type moduleVersion struct {
+	Version string `json:"version"`
 }
 
 const registryHostname = "registry.terraform.io"
@@ -41,12 +45,17 @@ const registryHostname = "registry.terraform.io"
 // nolint
 func (r *registryResolver) Resolve(ctx context.Context, target fs.FS, opt Options) (filesystem fs.FS, prefix string, downloadPath string, applies bool, err error) {
 
+	client := r.client
+	if opt.Client != nil {
+		client = opt.Client
+	}
+
 	if !opt.AllowDownloads {
 		return
 	}
 
 	inputVersion := opt.Version
-	source, _ := splitPackageSubdirRaw(opt.Source)
+	source, _ := splitPackageSubdirRaw(opt.OriginalSource)
 	parts := strings.Split(source, "/")
 	if len(parts) < 3 || len(parts) > 4 {
 		return
@@ -81,7 +90,7 @@ func (r *registryResolver) Resolve(ctx context.Context, target fs.FS, opt Option
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
-		resp, err := r.client.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			return nil, "", "", true, err
 		}
@@ -122,7 +131,7 @@ func (r *registryResolver) Resolve(ctx context.Context, target fs.FS, opt Option
 		req.Header.Set("X-Terraform-Version", opt.Version)
 	}
 
-	resp, err := r.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, "", "", true, err
 	}
@@ -188,7 +197,7 @@ func resolveVersion(input string, versions moduleVersions) (string, error) {
 		return "", fmt.Errorf("1 module expected, found %d", len(versions.Modules))
 	}
 	if len(versions.Modules[0].Versions) == 0 {
-		return "", fmt.Errorf("no available versions for module")
+		return "", errors.New("no available versions for module")
 	}
 
 	constraints, err := version.NewConstraints(input)
